@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,15 +50,26 @@ app.add_middleware(
 app.include_router(api_router)
 
 
-# Optional production static serving when frontend/dist is built
-if FRONTEND_DIST_DIR.exists() and (FRONTEND_DIST_DIR / "index.html").exists():
-    assets_dir = FRONTEND_DIST_DIR / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+def configure_spa_serving(target_app: FastAPI, dist_dir: Path) -> None:
+    """Mount compiled frontend assets and serve SPA fallback safely."""
+    index_file = dist_dir / "index.html"
+    if not dist_dir.exists() or not index_file.exists():
+        return
 
-    @app.get("/{full_path:path}")
+    resolved_root = dist_dir.resolve()
+    assets_dir = dist_dir / "assets"
+    if assets_dir.exists():
+        target_app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @target_app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        candidate = FRONTEND_DIST_DIR / full_path
-        if full_path and candidate.exists() and candidate.is_file():
-            return FileResponse(str(candidate))
-        return FileResponse(str(FRONTEND_DIST_DIR / "index.html"))
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        if full_path:
+            candidate = (dist_dir / full_path).resolve()
+            if candidate.is_relative_to(resolved_root) and candidate.exists() and candidate.is_file():
+                return FileResponse(str(candidate))
+        return FileResponse(str(index_file))
+
+
+configure_spa_serving(app, FRONTEND_DIST_DIR)

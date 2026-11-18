@@ -12,7 +12,7 @@ CACHE_DIR = DATA_DIR / "cache"
 OPENF1_CACHE_DIR = CACHE_DIR / "openf1"
 FASTF1_CACHE_DIR = CACHE_DIR / "fastf1"
 DB_PATH = Path(os.environ.get("F1_DB_PATH", DATA_DIR / "f1_overall.sqlite"))
-FRONTEND_DIST_DIR = REPO_ROOT / "frontend" / "dist"
+FRONTEND_DIST_DIR = Path(os.environ.get("F1_FRONTEND_DIST_DIR", REPO_ROOT / "frontend" / "dist"))
 
 JOLPICA_BASE_URL = "https://api.jolpi.ca/ergast/f1"
 JOLPICA_DUMPS_URL = "https://api.jolpi.ca/data/dumps/download/"

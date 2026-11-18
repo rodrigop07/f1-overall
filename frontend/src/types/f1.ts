@@ -62,6 +62,12 @@ export interface SeasonDriverRating {
   shrinkage_weight: number;
   delta_vs_prev: number | null;
   data_tier: string;
+  overall_ci: number;
+  wet_ovr: number;
+  street_ovr: number;
+  high_speed_ovr: number;
+  tyre_mgmt_ovr: number;
+  badges: string[];
 }
 
 export interface CarSeasonRating {
@@ -123,6 +129,12 @@ export interface AllTimeDriverRating {
   fia_penalties_count: number;
   clean_air_laps_total: number;
   data_tier: string;
+  overall_ci: number;
+  wet_ovr: number;
+  street_ovr: number;
+  high_speed_ovr: number;
+  tyre_mgmt_ovr: number;
+  badges: string[];
 }
 
 export interface AllTimeRankingsResponse {
@@ -171,6 +183,9 @@ export interface RaceMetricRow {
   on_track_overtakes: number;
   on_track_overtaken: number;
   data_tier: string;
+  circuit_type: 'STREET' | 'HIGH_SPEED' | 'TECHNICAL';
+  is_wet_race: number;
+  weekend_score: number | null;
 }
 
 export interface DriverProfileResponse {
@@ -217,6 +232,12 @@ export interface CompareDriverSide extends AllTimeDriverRating {
     team_color: string;
     races_count?: number;
     car_rating?: number;
+    overall_ci?: number;
+    wet_ovr?: number;
+    street_ovr?: number;
+    high_speed_ovr?: number;
+    tyre_mgmt_ovr?: number;
+    badges?: string[];
   } | null;
 }
 
@@ -364,4 +385,203 @@ export interface DiagnosticsResponse {
     }>;
   };
   last_updated: string;
+}
+
+export interface RaceSummaryRow {
+  round_id: number;
+  round_number: number;
+  name: string;
+  date: string | null;
+  circuit_name: string | null;
+  country: string | null;
+  locality: string | null;
+  circuit_type: 'STREET' | 'HIGH_SPEED' | 'TECHNICAL';
+  is_wet_race: boolean;
+  winner_name: string | null;
+  winner_ref: string | null;
+  winner_team_color: string | null;
+  dotw_name: string | null;
+  dotw_ref: string | null;
+  dotw_score: number | null;
+}
+
+export interface SeasonRacesResponse {
+  year: number;
+  races: RaceSummaryRow[];
+}
+
+export interface RaceXRayDriverRow {
+  driver_id: number;
+  reference: string;
+  abbreviation: string | null;
+  name: string;
+  country_code: string | null;
+  nationality: string | null;
+  team_name: string;
+  team_color: string;
+  grid: number | null;
+  finish_pos: number | null;
+  points: number;
+  status_category: string;
+  weekend_score: number;
+  quali_session_used: string | null;
+  quali_teammate_delta_pct: number | null;
+  pace_teammate_delta_pct: number | null;
+  clean_air_laps: number;
+  clean_laps_total: number;
+  on_track_overtakes: number;
+  on_track_overtaken: number;
+  lap1_net_gain: number | null;
+  fia_driving_penalties: number;
+  sprint_quali_delta_pct: number | null;
+  sprint_pace_delta_pct: number | null;
+  data_tier: string;
+}
+
+export interface RaceXRayResponse {
+  round: {
+    round_id: number;
+    year: number;
+    round_number: number;
+    name: string;
+    date: string | null;
+    circuit_name: string | null;
+    country: string | null;
+    locality: string | null;
+    circuit_type: 'STREET' | 'HIGH_SPEED' | 'TECHNICAL';
+    is_wet_race: boolean;
+    data_tier: string;
+  };
+  drivers: RaceXRayDriverRow[];
+  neutralizations: Array<{
+    lap_start: number;
+    lap_end: number;
+    status_type: string;
+    source: string;
+  }>;
+  stints: Array<{
+    driver_id: number;
+    reference: string;
+    abbreviation: string | null;
+    name: string;
+    stint_number: number;
+    lap_start: number;
+    lap_end: number;
+    compound: string;
+    tyre_age_at_start: number;
+    source: string;
+  }>;
+  lap_distributions: Array<{
+    driver_id: number;
+    reference: string;
+    abbreviation: string | null;
+    name: string;
+    team_color: string;
+    laps_count: number;
+    min_sec: number;
+    q25_sec: number;
+    median_sec: number;
+    q75_sec: number;
+    max_sec: number;
+  }>;
+}
+
+export interface TeamLineageSummary {
+  slug: string;
+  name: string;
+  primary_color: string;
+  era_names: string[];
+  first_year: number;
+  last_year: number;
+  seasons_count: number;
+  total_starts: number;
+  race_wins: number;
+  peak_car_rating: number;
+  avg_car_rating: number;
+  top_driver_name: string | null;
+  top_driver_ref: string | null;
+}
+
+export interface TeamHallOfFameDriver {
+  driver_id: number;
+  reference: string;
+  name: string;
+  nationality: string | null;
+  country_code: string | null;
+  first_year: number;
+  last_year: number;
+  starts_for_team: number;
+  wins_for_team: number;
+  podiums_for_team: number;
+  peak_stint_ovr: number | null;
+  alltime_overall: number | null;
+}
+
+export interface TeamLineageDetailResponse {
+  slug: string;
+  name: string;
+  primary_color: string;
+  era_names: string[];
+  timeline: CarSeasonRating[];
+  hall_of_fame: TeamHallOfFameDriver[];
+}
+
+export interface EqualMachineryStandingRow {
+  driver_id: number;
+  reference: string;
+  name: string;
+  team_name: string;
+  team_color: string;
+  actual_pos: number;
+  actual_points: number;
+  actual_wins: number;
+  equal_pos: number;
+  equal_points: number;
+  equal_wins: number;
+  equal_podiums: number;
+  pos_delta: number;
+  races: number;
+}
+
+export interface EqualMachineryResponse {
+  year: number;
+  exclude_mechanical_dnfs: boolean;
+  rounds_count: number;
+  actual_champion: EqualMachineryStandingRow | null;
+  equal_champion: EqualMachineryStandingRow | null;
+  standings: EqualMachineryStandingRow[];
+}
+
+export interface SeatSwapStandingRow {
+  projected_rank: number;
+  driver_id: number;
+  reference: string;
+  name: string;
+  team_name: string;
+  team_color: string;
+  overall: number;
+  is_swapped_driver: boolean;
+  is_teammate: boolean;
+  expected_points: number;
+  expected_wins: number;
+  expected_podiums: number;
+  expected_pos: number;
+  title_prob_pct: number;
+}
+
+export interface SeatSwapResponse {
+  year: number;
+  rounds_simulated: number;
+  n_simulations: number;
+  driver: SeatSwapStandingRow;
+  target_team: {
+    team_id: number;
+    team_name: string;
+    team_color: string;
+    car_rating: number;
+  };
+  replaced_driver: string;
+  teammate: SeatSwapStandingRow | null;
+  teammate_beat_pct: number | null;
+  standings: SeatSwapStandingRow[];
 }

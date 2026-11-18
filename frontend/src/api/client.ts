@@ -4,11 +4,17 @@ import type {
   DiagnosticsResponse,
   DriverProfileResponse,
   DriverSummary,
+  EqualMachineryResponse,
   NetworkResponse,
+  RaceXRayResponse,
   SeasonMeta,
+  SeasonRacesResponse,
   SeasonRankingsResponse,
+  SeatSwapResponse,
   SimulateRequestPayload,
   SimulateResponse,
+  TeamLineageDetailResponse,
+  TeamLineageSummary,
 } from '../types/f1';
 
 const API_BASE = '/api/v1';
@@ -93,4 +99,53 @@ export const api = {
     }),
 
   getDiagnostics: () => fetchJson<DiagnosticsResponse>(`${API_BASE}/diagnostics`),
+
+  getSeasonRaces: (year: number) =>
+    fetchJson<SeasonRacesResponse>(`${API_BASE}/races/${year}`),
+
+  getRaceXRay: (year: number, roundNumber: number) =>
+    fetchJson<RaceXRayResponse>(`${API_BASE}/races/${year}/${roundNumber}`),
+
+  getTeamLineages: () =>
+    fetchJson<{ lineages: TeamLineageSummary[] }>(`${API_BASE}/teams`),
+
+  getTeamLineageDetail: (slug: string) =>
+    fetchJson<TeamLineageDetailResponse>(`${API_BASE}/teams/${encodeURIComponent(slug)}`),
+
+  getEqualMachinery: (year: number, excludeMechanicalDnfs = true) =>
+    fetchJson<EqualMachineryResponse>(
+      `${API_BASE}/counterfactual/season/${year}?exclude_mechanical_dnfs=${excludeMechanicalDnfs}`
+    ),
+
+  simulateSeatSwap: (payload: {
+    driver_ref: string;
+    target_team_id: number;
+    year: number;
+    replace_driver_ref?: string;
+    n_sims?: number;
+  }) =>
+    fetchJson<SeatSwapResponse>(`${API_BASE}/counterfactual/seat-swap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  getPortrait: (driverRef: string) =>
+    fetchJson<{ reference: string; thumbnail_url: string | null }>(
+      `${API_BASE}/portraits/${encodeURIComponent(driverRef)}`
+    ),
+
+  getPortraitsBatch: (refs: string[]) =>
+    fetchJson<{ portraits: Record<string, string | null> }>(
+      `${API_BASE}/portraits?refs=${encodeURIComponent(refs.join(','))}`
+    ),
+
+  triggerSync: () =>
+    fetchJson<{
+      status: string;
+      year: number;
+      incremental: Record<string, unknown>;
+      openf1: Record<string, unknown>;
+      coverage: DiagnosticsResponse['coverage_stats'];
+    }>(`${API_BASE}/admin/sync`, { method: 'POST' }),
 };

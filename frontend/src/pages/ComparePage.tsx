@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ArrowRight, GitCompareArrows, Link2 } from 'lucide-react';
+import { ArrowRight, CloudRain, Compass, Flame, Gauge, GitCompareArrows, Link2 } from 'lucide-react';
 import { api } from '../api/client';
+import { CountryFlag } from '../components/CountryFlag';
+import { DriverAvatar } from '../components/DriverAvatar';
+import { ExportCardButton } from '../components/ExportCardButton';
 import { OverallBadge } from '../components/OverallBadge';
 import { PillarRadar } from '../components/PillarRadar';
 import type { CompareResponse, DriverSummary } from '../types/f1';
@@ -103,25 +106,63 @@ export function ComparePage() {
             </p>
           </div>
 
-          <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1">
-            <button
-              type="button"
-              onClick={() => setMode('alltime')}
-              className={`rounded-lg px-3.5 py-2 text-xs font-bold transition ${
-                mode === 'alltime' ? 'bg-[#E10600] text-white' : 'text-slate-300 hover:text-white'
-              }`}
-            >
-              Histórico Carreira
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('current')}
-              className={`rounded-lg px-3.5 py-2 text-xs font-bold transition ${
-                mode === 'current' ? 'bg-[#E10600] text-white' : 'text-slate-300 hover:text-white'
-              }`}
-            >
-              Forma Atual (Se Ativo)
-            </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1">
+              <button
+                type="button"
+                onClick={() => setMode('alltime')}
+                className={`rounded-lg px-3.5 py-2 text-xs font-bold transition ${
+                  mode === 'alltime' ? 'bg-[#E10600] text-white' : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                Histórico Carreira
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('current')}
+                className={`rounded-lg px-3.5 py-2 text-xs font-bold transition ${
+                  mode === 'current' ? 'bg-[#E10600] text-white' : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                Forma Atual (Se Ativo)
+              </button>
+            </div>
+            {data && ratingA && ratingB && (
+              <ExportCardButton
+                label="Exportar Duelo PNG"
+                data={{
+                  mode: 'compare',
+                  subtitle:
+                    mode === 'current'
+                      ? 'Comparação em Forma Atual'
+                      : 'Comparação Histórica Carreira (1950–2026)',
+                  driverA: {
+                    name: data.driver_a.name,
+                    teamName:
+                      'team_name' in ratingA ? ratingA.team_name : ratingA.primary_team_name,
+                    teamColor: '#E10600',
+                    overall: ratingA.overall,
+                    pace: ratingA.pace_ovr,
+                    qualifying: ratingA.quali_ovr,
+                    consistency: ratingA.consistency_ovr,
+                    racecraft: ratingA.racecraft_ovr,
+                    experience: ratingA.experience_ovr,
+                  },
+                  driverB: {
+                    name: data.driver_b.name,
+                    teamName:
+                      'team_name' in ratingB ? ratingB.team_name : ratingB.primary_team_name,
+                    teamColor: '#38BDF8',
+                    overall: ratingB.overall,
+                    pace: ratingB.pace_ovr,
+                    qualifying: ratingB.quali_ovr,
+                    consistency: ratingB.consistency_ovr,
+                    racecraft: ratingB.racecraft_ovr,
+                    experience: ratingB.experience_ovr,
+                  },
+                }}
+              />
+            )}
           </div>
         </div>
 
@@ -208,19 +249,33 @@ export function ComparePage() {
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             {/* Side A */}
             <div className="rounded-2xl border border-white/10 bg-[#111520] p-5 flex flex-col justify-between">
-              <div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-red-400">
-                  Piloto A
-                </span>
-                <Link
-                  to={`/drivers/${data.driver_a.reference}`}
-                  className="mt-1 block text-2xl font-black text-white hover:text-red-400"
-                >
-                  {data.driver_a.name}
-                </Link>
-                <p className="text-xs text-slate-400">
-                  {'team_name' in ratingA ? ratingA.team_name : ratingA.primary_team_name} · {data.driver_a.first_year}–{data.driver_a.last_year}
-                </p>
+              <div className="flex items-start gap-3">
+                <DriverAvatar
+                  reference={data.driver_a.reference}
+                  name={data.driver_a.name}
+                  abbreviation={data.driver_a.abbreviation}
+                  teamColor={'team_color' in ratingA ? ratingA.team_color : data.driver_a.primary_team_color}
+                  size="lg"
+                />
+                <div className="min-w-0">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-red-400">
+                    Piloto A
+                  </span>
+                  <Link
+                    to={`/drivers/${data.driver_a.reference}`}
+                    className="mt-0.5 flex items-center gap-2 text-2xl font-black text-white hover:text-red-400"
+                  >
+                    <CountryFlag
+                      countryCode={data.driver_a.country_code}
+                      nationality={data.driver_a.nationality}
+                      size="sm"
+                    />
+                    <span className="truncate">{data.driver_a.name}</span>
+                  </Link>
+                  <p className="text-xs text-slate-400">
+                    {'team_name' in ratingA ? ratingA.team_name : ratingA.primary_team_name} · {data.driver_a.first_year}–{data.driver_a.last_year}
+                  </p>
+                </div>
               </div>
               <div className="my-5 flex items-center justify-between">
                 <div className="space-y-1 text-xs text-slate-400">
@@ -231,8 +286,8 @@ export function ComparePage() {
                 </div>
                 <OverallBadge score={ratingA.overall} size="xl" showTier />
               </div>
-              <div className="text-[11px] font-mono text-slate-500">
-                Overall exato: {ratingA.overall_raw.toFixed(2)}
+              <div className="text-[11px] font-mono text-slate-400">
+                Overall exato: {ratingA.overall_raw.toFixed(2)} ± {(ratingA.overall_ci ?? data.driver_a.overall_ci).toFixed(1)}
               </div>
             </div>
 
@@ -263,19 +318,33 @@ export function ComparePage() {
 
             {/* Side B */}
             <div className="rounded-2xl border border-white/10 bg-[#111520] p-5 flex flex-col justify-between">
-              <div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400">
-                  Piloto B
-                </span>
-                <Link
-                  to={`/drivers/${data.driver_b.reference}`}
-                  className="mt-1 block text-2xl font-black text-white hover:text-sky-400"
-                >
-                  {data.driver_b.name}
-                </Link>
-                <p className="text-xs text-slate-400">
-                  {'team_name' in ratingB ? ratingB.team_name : ratingB.primary_team_name} · {data.driver_b.first_year}–{data.driver_b.last_year}
-                </p>
+              <div className="flex items-start gap-3">
+                <DriverAvatar
+                  reference={data.driver_b.reference}
+                  name={data.driver_b.name}
+                  abbreviation={data.driver_b.abbreviation}
+                  teamColor={'team_color' in ratingB ? ratingB.team_color : data.driver_b.primary_team_color}
+                  size="lg"
+                />
+                <div className="min-w-0">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400">
+                    Piloto B
+                  </span>
+                  <Link
+                    to={`/drivers/${data.driver_b.reference}`}
+                    className="mt-0.5 flex items-center gap-2 text-2xl font-black text-white hover:text-sky-400"
+                  >
+                    <CountryFlag
+                      countryCode={data.driver_b.country_code}
+                      nationality={data.driver_b.nationality}
+                      size="sm"
+                    />
+                    <span className="truncate">{data.driver_b.name}</span>
+                  </Link>
+                  <p className="text-xs text-slate-400">
+                    {'team_name' in ratingB ? ratingB.team_name : ratingB.primary_team_name} · {data.driver_b.first_year}–{data.driver_b.last_year}
+                  </p>
+                </div>
               </div>
               <div className="my-5 flex items-center justify-between">
                 <div className="space-y-1 text-xs text-slate-400">
@@ -286,8 +355,8 @@ export function ComparePage() {
                 </div>
                 <OverallBadge score={ratingB.overall} size="xl" showTier />
               </div>
-              <div className="text-[11px] font-mono text-slate-500">
-                Overall exato: {ratingB.overall_raw.toFixed(2)}
+              <div className="text-[11px] font-mono text-slate-400">
+                Overall exato: {ratingB.overall_raw.toFixed(2)} ± {(ratingB.overall_ci ?? data.driver_b.overall_ci).toFixed(1)}
               </div>
             </div>
           </div>
@@ -333,6 +402,51 @@ export function ComparePage() {
                   </div>
                 );
               })}
+            </div>
+          </section>
+
+          {/* Specialties H2H */}
+          <section className="rounded-2xl border border-white/10 bg-[#111520] p-6">
+            <h2 className="mb-4 text-base font-bold text-white">Especialidades Contextuais</h2>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                {
+                  label: 'Chuva',
+                  a: ratingA.wet_ovr ?? data.driver_a.wet_ovr,
+                  b: ratingB.wet_ovr ?? data.driver_b.wet_ovr,
+                  icon: CloudRain,
+                },
+                {
+                  label: 'Circuitos de Rua',
+                  a: ratingA.street_ovr ?? data.driver_a.street_ovr,
+                  b: ratingB.street_ovr ?? data.driver_b.street_ovr,
+                  icon: Compass,
+                },
+                {
+                  label: 'Alta Velocidade',
+                  a: ratingA.high_speed_ovr ?? data.driver_a.high_speed_ovr,
+                  b: ratingB.high_speed_ovr ?? data.driver_b.high_speed_ovr,
+                  icon: Gauge,
+                },
+                {
+                  label: 'Gestão de Pneus',
+                  a: ratingA.tyre_mgmt_ovr ?? data.driver_a.tyre_mgmt_ovr,
+                  b: ratingB.tyre_mgmt_ovr ?? data.driver_b.tyre_mgmt_ovr,
+                  icon: Flame,
+                },
+              ].map(({ label, a, b, icon: Icon }) => (
+                <div key={label} className="rounded-xl border border-white/10 bg-black/35 p-3.5 text-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-slate-300">
+                    <Icon className="h-3.5 w-3.5 text-slate-400" />
+                    {label}
+                  </div>
+                  <div className="mt-2.5 flex items-center justify-between font-mono text-base font-black">
+                    <span className={a >= b ? 'text-red-400' : 'text-slate-400'}>{a.toFixed(1)}</span>
+                    <span className="text-[11px] font-normal text-slate-600">vs</span>
+                    <span className={b >= a ? 'text-sky-400' : 'text-slate-400'}>{b.toFixed(1)}</span>
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
 

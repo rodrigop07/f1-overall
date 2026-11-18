@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Award, Search, Trophy } from 'lucide-react';
 import { api } from '../api/client';
+import { CountryFlag } from '../components/CountryFlag';
 import { OverallBadge } from '../components/OverallBadge';
 import type { AllTimeDriverRating } from '../types/f1';
 
@@ -227,16 +228,22 @@ export function AllTimeRankingsPage() {
                           style={{ backgroundColor: d.primary_team_color || '#94A3B8' }}
                         />
                         <div>
-                          <div className="flex items-center gap-1.5 font-bold text-white group-hover:text-red-400 transition-colors">
-                            {d.name}
+                          <div className="flex flex-wrap items-center gap-1.5 font-bold text-white group-hover:text-red-400 transition-colors">
+                            <CountryFlag countryCode={d.country_code} nationality={d.nationality} size="xs" />
+                            <span>{d.name}</span>
                             {d.championships > 0 && (
                               <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-300 border border-amber-400/25">
                                 <Award className="h-2.5 w-2.5" /> {d.championships}
                               </span>
                             )}
                           </div>
-                          <div className="text-[11px] text-slate-400">
-                            {d.primary_team_name} · {d.nationality}
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
+                            <span>{d.primary_team_name} · {d.nationality}</span>
+                            {d.badges?.[0] && (
+                              <span className="rounded bg-amber-500/10 px-1.5 py-0 text-[9px] font-semibold text-amber-300 border border-amber-400/20">
+                                {d.badges[0]}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </Link>
@@ -246,7 +253,12 @@ export function AllTimeRankingsPage() {
                       <div className="text-[10px] text-slate-500">auge {d.peak_years}</div>
                     </td>
                     <td className="px-3 py-3">
-                      <OverallBadge score={d.overall} size="sm" />
+                      <div className="flex items-center gap-1.5">
+                        <OverallBadge score={d.overall} size="sm" />
+                        <span className="font-mono text-[10px] text-slate-500">
+                          ±{d.overall_ci.toFixed(1)}
+                        </span>
+                      </div>
                     </td>
                     <td className="px-3 py-3 font-mono font-bold text-amber-300 tabular-nums">
                       {d.peak_overall.toFixed(1)}

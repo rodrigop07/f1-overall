@@ -3,8 +3,13 @@ import { Link, useParams } from 'react-router-dom';
 import {
   Award,
   CheckCircle2,
+  CloudRain,
+  Compass,
+  Flame,
+  Gauge,
   GitCompareArrows,
   ShieldCheck,
+  Sparkles,
   TriangleAlert,
   Wrench,
 } from 'lucide-react';
@@ -19,6 +24,9 @@ import {
   YAxis,
 } from 'recharts';
 import { api } from '../api/client';
+import { CountryFlag } from '../components/CountryFlag';
+import { DriverAvatar } from '../components/DriverAvatar';
+import { ExportCardButton } from '../components/ExportCardButton';
 import { OverallBadge } from '../components/OverallBadge';
 import { PillarBars } from '../components/PillarBars';
 import { PillarRadar } from '../components/PillarRadar';
@@ -91,58 +99,123 @@ export function DriverProfilePage() {
         />
 
         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-md bg-white/10 px-2 py-0.5 font-mono text-xs font-bold text-slate-200">
-                All-Time #{driver.alltime_rank}
-              </span>
-              {driver.championships > 0 && (
-                <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/15 px-2.5 py-0.5 text-xs font-bold text-amber-300">
-                  <Award className="h-3.5 w-3.5" /> {driver.championships}x Campeão Mundial
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+            <DriverAvatar
+              reference={driver.reference}
+              name={driver.name}
+              abbreviation={driver.abbreviation}
+              teamColor={teamColor || '#E10600'}
+              size="xl"
+            />
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-md bg-white/10 px-2 py-0.5 font-mono text-xs font-bold text-slate-200">
+                  All-Time #{driver.alltime_rank}
                 </span>
-              )}
-              <span className="text-xs text-slate-400 font-mono">
-                {driver.first_year}–{driver.last_year} · Auge {driver.peak_years}
-              </span>
-            </div>
+                {driver.championships > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/15 px-2.5 py-0.5 text-xs font-bold text-amber-300">
+                    <Award className="h-3.5 w-3.5" /> {driver.championships}x Campeão Mundial
+                  </span>
+                )}
+                <span className="text-xs text-slate-400 font-mono">
+                  {driver.first_year}–{driver.last_year} · Auge {driver.peak_years}
+                </span>
+              </div>
 
-            <h1 className="mt-2 text-3xl font-black tracking-tight text-white sm:text-4xl">
-              {driver.name}
-            </h1>
-            <p className="mt-1 text-sm text-slate-400">
-              {current_rating ? current_rating.team_name : driver.primary_team_name} ·{' '}
-              {driver.nationality}
-            </p>
+              <h1 className="mt-2 text-3xl font-black tracking-tight text-white sm:text-4xl">
+                {driver.name}
+              </h1>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-400">
+                <CountryFlag
+                  countryCode={driver.country_code}
+                  nationality={driver.nationality}
+                  size="sm"
+                  showLabel
+                />
+                <span>·</span>
+                <span>{current_rating ? current_rating.team_name : driver.primary_team_name}</span>
+              </div>
 
-            <div className="mt-4 flex flex-wrap gap-3 text-xs">
-              <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
-                <div className="text-slate-500">Largadas</div>
-                <div className="font-mono text-base font-bold text-white">{driver.career_starts}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
-                <div className="text-slate-500">Vitórias</div>
-                <div className="font-mono text-base font-bold text-white">{driver.career_wins}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
-                <div className="text-slate-500">Pódios</div>
-                <div className="font-mono text-base font-bold text-white">{driver.career_podiums}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
-                <div className="text-slate-500">Auge 3 Anos</div>
-                <div className="font-mono text-base font-bold text-amber-300">
-                  {driver.peak_overall.toFixed(1)}
+              {(active.badges?.length > 0 || driver.badges?.length > 0) && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {(active.badges?.length ? active.badges : driver.badges).map((b) => (
+                    <span
+                      key={b}
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-bold text-amber-200"
+                    >
+                      <Sparkles className="h-3 w-3 text-amber-400" />
+                      {b}
+                    </span>
+                  ))}
                 </div>
+              )}
+
+              <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
+                <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
+                  <div className="text-slate-500">Largadas</div>
+                  <div className="font-mono text-base font-bold text-white">{driver.career_starts}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
+                  <div className="text-slate-500">Vitórias</div>
+                  <div className="font-mono text-base font-bold text-white">{driver.career_wins}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
+                  <div className="text-slate-500">Pódios</div>
+                  <div className="font-mono text-base font-bold text-white">{driver.career_podiums}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2">
+                  <div className="text-slate-500">Auge 3 Anos</div>
+                  <div className="font-mono text-base font-bold text-amber-300">
+                    {driver.peak_overall.toFixed(1)}
+                  </div>
+                </div>
+                <Link
+                  to={`/compare?a=${driver.reference}`}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#E10600] px-4 py-2 font-bold text-white hover:bg-red-600 transition-colors"
+                >
+                  <GitCompareArrows className="h-4 w-4" /> Comparar Piloto
+                </Link>
+                <ExportCardButton
+                  data={{
+                    mode: 'driver',
+                    name: driver.name,
+                    reference: driver.reference,
+                    teamName: current_rating ? current_rating.team_name : driver.primary_team_name,
+                    teamColor: teamColor || '#E10600',
+                    nationality: driver.nationality,
+                    overall: active.overall,
+                    overallRaw: active.overall_raw,
+                    overallCi: active.overall_ci,
+                    subtitle:
+                      viewScope === 'current' && current_rating
+                        ? `Forma Atual (${current_rating.year})`
+                        : `Histórico Carreira (${driver.first_year}–${driver.last_year})`,
+                    pillars: {
+                      pace: active.pace_ovr,
+                      qualifying: active.quali_ovr,
+                      consistency: active.consistency_ovr,
+                      racecraft: active.racecraft_ovr,
+                      experience: active.experience_ovr,
+                    },
+                    specialties: {
+                      wet: active.wet_ovr,
+                      street: active.street_ovr,
+                      highSpeed: active.high_speed_ovr,
+                      tyre: active.tyre_mgmt_ovr,
+                    },
+                    badges: active.badges?.length ? active.badges : driver.badges,
+                    stats: [
+                      { label: 'GPs', value: String(driver.career_starts) },
+                      { label: 'Vitórias', value: String(driver.career_wins) },
+                      { label: 'Títulos', value: `${driver.championships}x` },
+                    ],
+                  }}
+                />
               </div>
-              <Link
-                to={`/compare?a=${driver.reference}`}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#E10600] px-4 py-2 font-bold text-white hover:bg-red-600 transition-colors"
-              >
-                <GitCompareArrows className="h-4 w-4" /> Comparar Piloto
-              </Link>
             </div>
           </div>
 
-          <div className="flex flex-col items-end gap-3">
+          <div className="flex flex-col items-end gap-3 shrink-0">
             {current_rating && (
               <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1">
                 <button
@@ -170,8 +243,8 @@ export function DriverProfilePage() {
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                   {viewScope === 'current' ? 'Overall Atual' : 'Overall Histórico'}
                 </div>
-                <div className="font-mono text-xs text-slate-500">
-                  exato {active.overall_raw.toFixed(2)}
+                <div className="font-mono text-xs text-slate-400">
+                  exato {active.overall_raw.toFixed(2)} ± {active.overall_ci.toFixed(1)}
                 </div>
               </div>
               <OverallBadge score={active.overall} size="xl" showTier />
@@ -271,6 +344,73 @@ export function DriverProfilePage() {
           </div>
         </section>
       </div>
+
+      {/* Specialties Breakdown */}
+      <section className="rounded-2xl border border-white/10 bg-[#111520] p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300">
+              Especialidades por Condição & Pista
+            </h2>
+            <p className="text-xs text-slate-500">
+              Isolamento contextual via Z-scores por tipo de circuito, corridas sob chuva e controle de degradação por stint.
+            </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {[
+            {
+              label: 'Especialista em Chuva',
+              value: active.wet_ovr,
+              icon: CloudRain,
+              color: 'text-sky-400',
+              bar: '#38BDF8',
+            },
+            {
+              label: 'Circuitos de Rua',
+              value: active.street_ovr,
+              icon: Compass,
+              color: 'text-amber-400',
+              bar: '#F59E0B',
+            },
+            {
+              label: 'Alta Velocidade',
+              value: active.high_speed_ovr,
+              icon: Gauge,
+              color: 'text-red-400',
+              bar: '#EF4444',
+            },
+            {
+              label: 'Gestão de Pneus',
+              value: active.tyre_mgmt_ovr,
+              icon: Flame,
+              color: 'text-emerald-400',
+              bar: '#10B981',
+            },
+          ].map(({ label, value, icon: Icon, color, bar }) => {
+            const pct = Math.max(6, Math.min(100, ((value - 55) / 44) * 100));
+            return (
+              <div key={label} className="rounded-xl border border-white/10 bg-black/35 p-3.5">
+                <div className="flex items-center justify-between text-xs text-slate-300 font-semibold">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Icon className={`h-4 w-4 ${color}`} />
+                    {label}
+                  </span>
+                  <span className="font-mono text-base font-black text-white tabular-nums">
+                    {value.toFixed(1)}
+                  </span>
+                </div>
+                <div className="mt-2.5 h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${pct}%`, backgroundColor: bar }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
 
       {/* Career Progression: Driver Overall vs Car Rating */}
       {progressionData.length > 0 && (
@@ -418,6 +558,7 @@ export function DriverProfilePage() {
                   <th className="px-4 py-2.5">GP</th>
                   <th className="px-3 py-2.5">Equipe</th>
                   <th className="px-3 py-2.5">Grid → Chegada</th>
+                  <th className="px-3 py-2.5">Nota FDS</th>
                   <th className="px-3 py-2.5">Status Higiene</th>
                   <th className="px-3 py-2.5">Sessão Quali</th>
                   <th className="px-3 py-2.5">Ar Limpo</th>
@@ -429,12 +570,36 @@ export function DriverProfilePage() {
                 {recent_races.map((r) => (
                   <tr key={r.round_id} className="hover:bg-white/[0.02]">
                     <td className="px-4 py-2.5 font-medium text-white">
-                      <span className="font-mono text-slate-400 mr-1.5">{r.year}</span>
-                      {r.round_name}
+                      <Link
+                        to={`/races/${r.year}/${r.round_number}`}
+                        className="inline-flex flex-wrap items-center gap-1.5 hover:text-red-400 transition-colors"
+                      >
+                        <span className="font-mono text-slate-400">{r.year}</span>
+                        <span>{r.round_name}</span>
+                        <span className="rounded bg-white/10 px-1.5 py-0 text-[9px] font-semibold text-slate-300">
+                          {r.circuit_type === 'STREET'
+                            ? 'Rua'
+                            : r.circuit_type === 'HIGH_SPEED'
+                              ? 'Alta Vel.'
+                              : 'Técnico'}
+                        </span>
+                        {r.is_wet_race === 1 && (
+                          <span className="inline-flex items-center gap-0.5 rounded bg-sky-500/20 px-1.5 py-0 text-[9px] font-bold text-sky-300 border border-sky-400/30">
+                            <CloudRain className="h-2.5 w-2.5" /> Chuva
+                          </span>
+                        )}
+                      </Link>
                     </td>
                     <td className="px-3 py-2.5 text-slate-300">{r.team_name}</td>
                     <td className="px-3 py-2.5 font-mono text-slate-200">
                       P{r.grid ?? '?'} → {r.finish_pos ? `P${r.finish_pos}` : 'DNF'}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {r.weekend_score !== null && r.weekend_score !== undefined ? (
+                        <OverallBadge score={Math.round(r.weekend_score)} size="sm" />
+                      ) : (
+                        '—'
+                      )}
                     </td>
                     <td className="px-3 py-2.5">
                       <span

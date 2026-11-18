@@ -1,0 +1,35 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: f1-overall-backend
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      F1_DATA_DIR: /data
+      F1_DB_PATH: /data/f1_overall.sqlite
+      AUTO_BOOTSTRAP: ${AUTO_BOOTSTRAP:-true}
+      FASTF1_TOKEN: ${FASTF1_TOKEN:-}
+    volumes:
+      - ./backend/data:/data
+    ports:
+      - "${BACKEND_PORT:-8010}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: f1-overall-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped

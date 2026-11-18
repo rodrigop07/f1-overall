@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import config
 from app.db.connection import get_connection
 from app.db.schema import init_schema
 from app.engine.pipeline import run_full_computation
-from app.main import app
+from app.main import app, configure_spa_serving
 
 
 def test_api_endpoints_with_isolated_db(tmp_path, monkeypatch):
@@ -82,3 +83,35 @@ def test_api_endpoints_with_isolated_db(tmp_path, monkeypatch):
         )
         assert r_sim.status_code == 200
         assert r_sim.json()["elapsed_ms"] < 200.0
+
+
+def test_configure_spa_serving_falls_back_cleanly_without_masking_api_404(tmp_path):
+    dist_dir = tmp_path / "dist"
+    assets_dir = dist_dir / "assets"
+    assets_dir.mkdir(parents=True)
+    (dist_dir / "index.html").write_text("<html><body>F1 Overall SPA</body></html>", encoding="utf-8")
+    (assets_dir / "app.js").write_text("console.log('ok');", encoding="utf-8")
+
+    spa_app = FastAPI()
+
+    @spa_app.get("/api/v1/ping")
+    def ping():
+        return {"pong": True}
+
+    configure_spa_serving(spa_app, dist_dir)
+
+    with TestClient(spa_app) as client:
+        assert client.get("/api/v1/ping").json() == {"pong": True}
+
+        r_api_404 = client.get("/api/v1/inexistente")
+        assert r_api_404.status_code == 404
+        assert r_api_404.json() == {"detail": "Not Found"}
+
+        r_asset = client.get("/assets/app.js")
+        assert r_asset.status_code == 200
+        assert "console.log" in r_asset.text
+
+        for route in ("/", "/drivers/senna", "/what-if", "/races/2026/2"):
+            r_spa = client.get(route)
+            assert r_spa.status_code == 200
+            assert "F1 Overall SPA" in r_spa.text
