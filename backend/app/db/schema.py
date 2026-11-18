@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS ingestion_state (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS driver_portraits (
+    driver_id INTEGER PRIMARY KEY,
+    thumbnail_url TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 COMPUTED_TABLES_SQL = """
@@ -190,6 +196,8 @@ CREATE TABLE IF NOT EXISTS race_driver_metrics (
     round_number INTEGER,
     round_name TEXT,
     round_date TEXT,
+    circuit_type TEXT DEFAULT 'TECHNICAL',
+    is_wet_race INTEGER DEFAULT 0,
     grid INTEGER,
     finish_pos INTEGER,
     points REAL,
@@ -199,6 +207,8 @@ CREATE TABLE IF NOT EXISTS race_driver_metrics (
     quali_session_used TEXT,
     quali_teammate_delta_pct REAL,
     quali_perf_pct REAL,
+    sprint_quali_delta_pct REAL,
+    sprint_pace_delta_pct REAL,
     clean_air_laps INTEGER DEFAULT 0,
     clean_laps_total INTEGER DEFAULT 0,
     pace_residual_pct REAL,
@@ -216,6 +226,7 @@ CREATE TABLE IF NOT EXISTS race_driver_metrics (
     on_track_overtaken INTEGER DEFAULT 0,
     defense_laps INTEGER DEFAULT 0,
     racecraft_score REAL,
+    weekend_score REAL,
     cumulative_starts INTEGER DEFAULT 1,
     age_years REAL,
     data_tier TEXT NOT NULL,
@@ -233,6 +244,7 @@ CREATE TABLE IF NOT EXISTS driver_season_ratings (
     clean_races_count INTEGER NOT NULL,
     overall INTEGER NOT NULL,
     overall_raw REAL NOT NULL,
+    overall_ci REAL NOT NULL DEFAULT 1.5,
     z_final REAL NOT NULL,
     pace_ovr REAL NOT NULL,
     quali_ovr REAL NOT NULL,
@@ -244,6 +256,11 @@ CREATE TABLE IF NOT EXISTS driver_season_ratings (
     z_consistency REAL NOT NULL,
     z_racecraft REAL NOT NULL,
     z_experience REAL NOT NULL,
+    wet_ovr REAL NOT NULL DEFAULT 82.0,
+    street_ovr REAL NOT NULL DEFAULT 82.0,
+    high_speed_ovr REAL NOT NULL DEFAULT 82.0,
+    tyre_mgmt_ovr REAL NOT NULL DEFAULT 82.0,
+    badges_json TEXT NOT NULL DEFAULT '[]',
     car_rating REAL NOT NULL,
     shrinkage_weight REAL NOT NULL,
     delta_vs_prev REAL,
@@ -264,6 +281,7 @@ CREATE TABLE IF NOT EXISTS driver_alltime_ratings (
     primary_team_color TEXT,
     overall INTEGER NOT NULL,
     overall_raw REAL NOT NULL,
+    overall_ci REAL NOT NULL DEFAULT 1.5,
     peak_overall REAL NOT NULL,
     longevity_overall REAL NOT NULL,
     pace_ovr REAL NOT NULL,
@@ -276,6 +294,11 @@ CREATE TABLE IF NOT EXISTS driver_alltime_ratings (
     z_consistency REAL NOT NULL,
     z_racecraft REAL NOT NULL,
     z_experience REAL NOT NULL,
+    wet_ovr REAL NOT NULL DEFAULT 82.0,
+    street_ovr REAL NOT NULL DEFAULT 82.0,
+    high_speed_ovr REAL NOT NULL DEFAULT 82.0,
+    tyre_mgmt_ovr REAL NOT NULL DEFAULT 82.0,
+    badges_json TEXT NOT NULL DEFAULT '[]',
     mechanical_dnfs_excluded INTEGER DEFAULT 0,
     driver_error_dnfs INTEGER DEFAULT 0,
     fia_penalties_count INTEGER DEFAULT 0,
@@ -345,7 +368,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 
 def reset_computed_tables(conn: sqlite3.Connection) -> None:
-    """Clear computed analytical tables before recomputation."""
+    """Drop and recreate computed analytical tables so schema upgrades apply cleanly."""
     for table in (
         "race_driver_metrics",
         "driver_season_ratings",
@@ -354,4 +377,6 @@ def reset_computed_tables(conn: sqlite3.Connection) -> None:
         "teammate_network_edges",
         "model_diagnostics",
     ):
-        conn.execute(f"DELETE FROM {table}")
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    conn.executescript(COMPUTED_TABLES_SQL)
+    conn.executescript(INDEXES_SQL)

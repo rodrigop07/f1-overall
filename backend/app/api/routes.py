@@ -5,14 +5,41 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
+import httpx
+import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.api.schemas import SimulateRequest
+from app.api.schemas import SeatSwapRequest, SimulateRequest
+from app.config import USER_AGENT
 from app.db.connection import get_connection
+from app.engine.counterfactual import (
+    simulate_equal_machinery_season,
+    simulate_seat_swap,
+)
+from app.engine.lineages import get_lineage_detail, list_lineages
+from app.engine.pipeline import run_full_computation
+from app.ingestion.jolpica_incremental import sync_missing_recent_rounds
+from app.ingestion.openf1_ingestor import enrich_from_openf1
 
 router = APIRouter(prefix="/api/v1")
+
+
+def _parse_badges(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.get("badges_json")
+    if isinstance(raw, str):
+        try:
+            item["badges"] = json.loads(raw)
+        except json.JSONDecodeError:
+            item["badges"] = []
+    elif isinstance(item.get("badges"), list):
+        pass
+    else:
+        item["badges"] = []
+    return item
 
 
 def _get_db() -> sqlite3.Connection:
@@ -267,7 +294,7 @@ def _fetch_season_rankings(conn: sqlite3.Connection, year: int, mode: str) -> di
 
     drivers = []
     for idx, r in enumerate(rows, start=1):
-        item = dict(r)
+        item = _parse_badges(dict(r))
         item["rank"] = idx
         item["car_delta"] = round(float(item["overall_raw"]) - float(item["car_rating"]), 2)
         drivers.append(item)
@@ -362,7 +389,7 @@ def get_alltime_rankings(
 
         drivers = []
         for idx, r in enumerate(rows, start=offset + 1):
-            item = dict(r)
+            item = _parse_badges(dict(r))
             item["rank"] = idx
             drivers.append(item)
 
@@ -498,6 +525,7 @@ def get_driver_profile(driver_ref: str) -> dict[str, Any]:
                 """
                 SELECT
                     m.round_id, m.year, m.round_number, m.round_name, m.round_date,
+                    m.circuit_type, m.is_wet_race, m.weekend_score,
                     t.name AS team_name, t.primary_color AS team_color,
                     m.grid, m.finish_pos, m.status_category, m.fia_driving_penalties,
                     m.quali_session_used, m.quali_teammate_delta_pct,
@@ -515,9 +543,9 @@ def get_driver_profile(driver_ref: str) -> dict[str, Any]:
         ]
 
         return {
-            "driver": {**dict(drv), "alltime_rank": alltime_rank},
-            "current_rating": dict(current_rating) if current_rating else None,
-            "seasons": seasons,
+            "driver": _parse_badges({**dict(drv), "alltime_rank": alltime_rank}),
+            "current_rating": _parse_badges(dict(current_rating)) if current_rating else None,
+            "seasons": [_parse_badges(s) for s in seasons],
             "teammates": teammates,
             "hygiene_summary": {
                 "clean_finishes": hygiene_counts.get("CLEAN_FINISH", 0),
@@ -567,22 +595,28 @@ def compare_drivers(
                     sql += " ORDER BY year DESC LIMIT 1"
                 sr = conn.execute(sql, params).fetchone()
                 if sr:
-                    d_dict["active_rating"] = dict(sr)
+                    d_dict["active_rating"] = _parse_badges(dict(sr))
                 else:
                     d_dict["active_rating"] = None
             else:
                 d_dict["active_rating"] = {
                     "overall": d_dict["overall"],
                     "overall_raw": d_dict["overall_raw"],
+                    "overall_ci": d_dict.get("overall_ci", 1.5),
                     "pace_ovr": d_dict["pace_ovr"],
                     "quali_ovr": d_dict["quali_ovr"],
                     "consistency_ovr": d_dict["consistency_ovr"],
                     "racecraft_ovr": d_dict["racecraft_ovr"],
                     "experience_ovr": d_dict["experience_ovr"],
+                    "wet_ovr": d_dict.get("wet_ovr", 82.0),
+                    "street_ovr": d_dict.get("street_ovr", 82.0),
+                    "high_speed_ovr": d_dict.get("high_speed_ovr", 82.0),
+                    "tyre_mgmt_ovr": d_dict.get("tyre_mgmt_ovr", 82.0),
+                    "badges": _parse_badges(d_dict)["badges"],
                     "team_name": d_dict["primary_team_name"],
                     "team_color": d_dict["primary_team_color"],
                 }
-            return d_dict
+            return _parse_badges(d_dict)
 
         da = _load_one(driver_a)
         db = _load_one(driver_b)
@@ -771,5 +805,347 @@ def get_model_diagnostics() -> dict[str, Any]:
     try:
         rows = conn.execute("SELECT key, value_json FROM model_diagnostics").fetchall()
         return {r["key"]: json.loads(r["value_json"]) for r in rows}
+    finally:
+        conn.close()
+
+
+@router.get("/races/{year}")
+def get_season_races(year: int) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        rounds = conn.execute(
+            """
+            SELECT r.id AS round_id, r.number AS round_number, r.name, r.date,
+                   c.name AS circuit_name, c.country, c.locality
+            FROM rounds r
+            JOIN seasons s ON s.id = r.season_id
+            LEFT JOIN circuits c ON c.id = r.circuit_id
+            WHERE s.year = ? AND r.is_cancelled = 0
+              AND EXISTS (SELECT 1 FROM race_driver_metrics m WHERE m.round_id = r.id)
+            ORDER BY r.number ASC
+            """,
+            (year,),
+        ).fetchall()
+        if not rounds:
+            raise HTTPException(status_code=404, detail=f"No races found for season {year}")
+
+        metrics = conn.execute(
+            """
+            SELECT m.round_id, m.driver_id, m.finish_pos, m.weekend_score, m.circuit_type, m.is_wet_race,
+                   d.reference, d.forename || ' ' || d.surname AS name,
+                   t.name AS team_name, t.primary_color AS team_color
+            FROM race_driver_metrics m
+            JOIN drivers d ON d.id = m.driver_id
+            JOIN teams t ON t.id = m.team_id
+            WHERE m.year = ?
+            """,
+            (year,),
+        ).fetchall()
+
+        by_rnd: dict[int, list[dict]] = {}
+        for m in metrics:
+            by_rnd.setdefault(int(m["round_id"]), []).append(dict(m))
+
+        out = []
+        for rnd in rounds:
+            rid = int(rnd["round_id"])
+            rows = by_rnd.get(rid, [])
+            winner = next((x for x in rows if x["finish_pos"] == 1), None)
+            dotw = max(rows, key=lambda x: float(x["weekend_score"] or 0.0), default=None)
+            sample = rows[0] if rows else {}
+            out.append(
+                {
+                    "round_id": rid,
+                    "round_number": int(rnd["round_number"]),
+                    "name": rnd["name"],
+                    "date": rnd["date"],
+                    "circuit_name": rnd["circuit_name"],
+                    "country": rnd["country"],
+                    "locality": rnd["locality"],
+                    "circuit_type": sample.get("circuit_type", "TECHNICAL"),
+                    "is_wet_race": bool(sample.get("is_wet_race", 0)),
+                    "winner_name": winner["name"] if winner else None,
+                    "winner_ref": winner["reference"] if winner else None,
+                    "winner_team_color": winner["team_color"] if winner else None,
+                    "dotw_name": dotw["name"] if dotw else None,
+                    "dotw_ref": dotw["reference"] if dotw else None,
+                    "dotw_score": dotw["weekend_score"] if dotw else None,
+                }
+            )
+        return {"year": year, "races": out}
+    finally:
+        conn.close()
+
+
+@router.get("/races/{year}/{round_number}")
+def get_race_xray(year: int, round_number: int) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        rnd = conn.execute(
+            """
+            SELECT r.id AS round_id, r.number AS round_number, r.name, r.date,
+                   c.name AS circuit_name, c.country, c.locality
+            FROM rounds r
+            JOIN seasons s ON s.id = r.season_id
+            LEFT JOIN circuits c ON c.id = r.circuit_id
+            WHERE s.year = ? AND r.number = ? AND r.is_cancelled = 0
+            """,
+            (year, round_number),
+        ).fetchone()
+        if not rnd:
+            raise HTTPException(status_code=404, detail=f"Round {year} R{round_number} not found")
+        rid = int(rnd["round_id"])
+
+        drivers = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT m.*, d.reference, d.abbreviation, d.forename || ' ' || d.surname AS name,
+                       d.country_code, d.nationality,
+                       t.name AS team_name, t.primary_color AS team_color
+                FROM race_driver_metrics m
+                JOIN drivers d ON d.id = m.driver_id
+                JOIN teams t ON t.id = m.team_id
+                WHERE m.round_id = ?
+                ORDER BY m.weekend_score DESC, COALESCE(m.finish_pos, 99) ASC
+                """,
+                (rid,),
+            ).fetchall()
+        ]
+        if not drivers:
+            raise HTTPException(status_code=404, detail=f"No computed race metrics for {year} R{round_number}")
+
+        neutralizations = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT lap_start, lap_end, status_type, source FROM track_neutralizations WHERE round_id = ? ORDER BY lap_start",
+                (rid,),
+            ).fetchall()
+        ]
+
+        stints = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT s.driver_id, d.reference, d.abbreviation, d.forename || ' ' || d.surname AS name,
+                       s.stint_number, s.lap_start, s.lap_end, s.compound, s.tyre_age_at_start, s.source
+                FROM stint_enrichments s
+                JOIN drivers d ON d.id = s.driver_id
+                WHERE s.round_id = ?
+                ORDER BY s.driver_id, s.stint_number
+                """,
+                (rid,),
+            ).fetchall()
+        ]
+
+        # Lap-time distribution (clean green-flag laps per driver)
+        lap_rows = conn.execute(
+            """
+            SELECT td.driver_id, l.time_sec
+            FROM laps l
+            JOIN session_entries se ON se.id = l.session_entry_id
+            JOIN sessions ss ON ss.id = se.session_id
+            JOIN round_entries re ON re.id = se.round_entry_id
+            JOIN team_drivers td ON td.id = re.team_driver_id
+            WHERE ss.round_id = ? AND ss.type = 'R' AND l.number >= 2 AND l.is_deleted = 0 AND l.time_sec BETWEEN 35 AND 400
+            """,
+            (rid,),
+        ).fetchall()
+        laps_by_d: dict[int, list[float]] = {}
+        all_laps_flat: list[float] = []
+        for lr in lap_rows:
+            t = float(lr["time_sec"])
+            laps_by_d.setdefault(int(lr["driver_id"]), []).append(t)
+            all_laps_flat.append(t)
+
+        lap_distributions = []
+        if all_laps_flat:
+            race_med = float(np.median(all_laps_flat))
+            drv_lookup = {int(d["driver_id"]): d for d in drivers}
+            for did, times in laps_by_d.items():
+                clean_t = [t for t in times if 0.88 * race_med <= t <= 1.07 * race_med]
+                if len(clean_t) < 3 or did not in drv_lookup:
+                    continue
+                arr = np.asarray(clean_t, dtype=float)
+                dinfo = drv_lookup[did]
+                lap_distributions.append(
+                    {
+                        "driver_id": did,
+                        "reference": dinfo["reference"],
+                        "abbreviation": dinfo["abbreviation"] or dinfo["name"].split()[-1][:3].upper(),
+                        "name": dinfo["name"],
+                        "team_color": dinfo["team_color"],
+                        "laps_count": len(clean_t),
+                        "min_sec": round(float(np.min(arr)), 3),
+                        "q25_sec": round(float(np.percentile(arr, 25)), 3),
+                        "median_sec": round(float(np.median(arr)), 3),
+                        "q75_sec": round(float(np.percentile(arr, 75)), 3),
+                        "max_sec": round(float(np.max(arr)), 3),
+                    }
+                )
+            lap_distributions.sort(key=lambda x: x["median_sec"])
+
+        sample = drivers[0]
+        return {
+            "round": {
+                "round_id": rid,
+                "year": year,
+                "round_number": int(rnd["round_number"]),
+                "name": rnd["name"],
+                "date": rnd["date"],
+                "circuit_name": rnd["circuit_name"],
+                "country": rnd["country"],
+                "locality": rnd["locality"],
+                "circuit_type": sample.get("circuit_type", "TECHNICAL"),
+                "is_wet_race": bool(sample.get("is_wet_race", 0)),
+                "data_tier": sample.get("data_tier", "HISTORICAL_RESULT"),
+            },
+            "drivers": drivers,
+            "neutralizations": neutralizations,
+            "stints": stints,
+            "lap_distributions": lap_distributions,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/teams")
+def get_team_lineages() -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        return {"lineages": list_lineages(conn)}
+    finally:
+        conn.close()
+
+
+@router.get("/teams/{slug}")
+def get_team_lineage_detail(slug: str) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        detail = get_lineage_detail(conn, slug)
+        if not detail:
+            raise HTTPException(status_code=404, detail=f"Team lineage '{slug}' not found")
+        return detail
+    finally:
+        conn.close()
+
+
+@router.get("/counterfactual/season/{year}")
+def get_equal_machinery_championship(
+    year: int,
+    exclude_mechanical_dnfs: bool = Query(True),
+) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        res = simulate_equal_machinery_season(conn, year, exclude_mechanical_dnfs=exclude_mechanical_dnfs)
+        if not res["standings"]:
+            raise HTTPException(status_code=404, detail=f"No race data for season {year}")
+        return res
+    finally:
+        conn.close()
+
+
+@router.post("/counterfactual/seat-swap")
+def post_seat_swap(payload: SeatSwapRequest) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        return simulate_seat_swap(
+            conn,
+            driver_ref=payload.driver_ref,
+            target_team_id=payload.target_team_id,
+            year=payload.year,
+            replace_driver_ref=payload.replace_driver_ref,
+            n_sims=payload.n_sims,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+def _resolve_portrait(conn: sqlite3.Connection, driver_id: int, wiki_url: str | None) -> str:
+    cached = conn.execute(
+        "SELECT thumbnail_url FROM driver_portraits WHERE driver_id = ?", (driver_id,)
+    ).fetchone()
+    if cached is not None:
+        return str(cached["thumbnail_url"])
+
+    thumb = ""
+    if wiki_url and "/wiki/" in wiki_url:
+        title = unquote(wiki_url.split("/wiki/")[-1].split("#")[0]).strip()
+        if title:
+            try:
+                resp = httpx.get(
+                    f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}",
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=3.5,
+                    follow_redirects=True,
+                )
+                if resp.status_code == 200:
+                    thumb = str((resp.json().get("thumbnail") or {}).get("source") or "")
+            except httpx.HTTPError:
+                thumb = ""
+
+    conn.execute(
+        "INSERT OR REPLACE INTO driver_portraits (driver_id, thumbnail_url, updated_at) VALUES (?, ?, ?)",
+        (driver_id, thumb, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    return thumb
+
+
+@router.get("/portraits/{driver_ref}")
+def get_driver_portrait(driver_ref: str) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, wikipedia FROM drivers WHERE reference = ?", (driver_ref,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Driver '{driver_ref}' not found")
+        thumb = _resolve_portrait(conn, int(row["id"]), row["wikipedia"])
+        return {"reference": driver_ref, "thumbnail_url": thumb or None}
+    finally:
+        conn.close()
+
+
+@router.get("/portraits")
+def get_driver_portraits_batch(refs: str = Query(..., max_length=1500)) -> dict[str, Any]:
+    ref_list = [r.strip() for r in refs.split(",") if r.strip()][:25]
+    if not ref_list:
+        return {"portraits": {}}
+    conn = _get_db()
+    try:
+        placeholders = ",".join("?" for _ in ref_list)
+        rows = conn.execute(
+            f"SELECT id, reference, wikipedia FROM drivers WHERE reference IN ({placeholders})",
+            ref_list,
+        ).fetchall()
+        portraits: dict[str, str | None] = {}
+        for r in rows:
+            thumb = _resolve_portrait(conn, int(r["id"]), r["wikipedia"])
+            portraits[r["reference"]] = thumb or None
+        return {"portraits": portraits}
+    finally:
+        conn.close()
+
+
+@router.post("/admin/sync")
+def trigger_incremental_sync(request: Request) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        max_yr = int(conn.execute("SELECT COALESCE(MAX(year), 2026) FROM seasons").fetchone()[0])
+        inc = sync_missing_recent_rounds(conn, year=max_yr)
+        of1 = enrich_from_openf1(conn, years=(max_yr,))
+        diag = run_full_computation(conn)
+        conn.commit()
+        request.app.state.simulator.reload_from_db(conn)
+        return {
+            "status": "ok",
+            "year": max_yr,
+            "incremental": inc,
+            "openf1": of1,
+            "coverage": diag["coverage_stats"],
+        }
     finally:
         conn.close()

@@ -23,3 +23,11 @@ class SimulateRequest(BaseModel):
     scale_factor: float = Field(6.0, ge=2.0, le=12.0)
     min_starts: int = Field(0, ge=0, le=300)
     limit: int = Field(60, ge=5, le=200)
+
+
+class SeatSwapRequest(BaseModel):
+    driver_ref: str
+    target_team_id: int
+    year: int = Field(2026, ge=1950, le=2026)
+    replace_driver_ref: str | None = None
+    n_sims: int = Field(500, ge=100, le=2000)

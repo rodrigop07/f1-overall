@@ -37,6 +37,12 @@ from app.engine.pillars.racecraft import (
     compute_raw_racecraft_events,
     finalize_racecraft_scores,
 )
+from app.engine.specialties import (
+    classify_circuit_type,
+    compute_confidence_interval,
+    detect_wet_rounds,
+    generate_driver_badges,
+)
 
 
 def _compute_age_years(dob: str | None, race_date: str | None, fallback_year: int) -> float | None:
@@ -87,9 +93,14 @@ def _shrink_and_standardize_pillar(
 
     Note: Missing observations (`isnan` or `eff_n == 0`) shrink 100% to `baseline_z`.
     """
-    valid_ref = ref_mask & np.isfinite(obs_values) & (eff_n > 0)
+    all_valid = np.isfinite(obs_values) & (eff_n > 0)
+    if np.sum(all_valid) < 2:
+        zeros = np.zeros_like(obs_values, dtype=float)
+        return zeros, zeros
+
+    valid_ref = ref_mask & all_valid
     if np.sum(valid_ref) < 2:
-        valid_ref = np.isfinite(obs_values) & (eff_n > 0)
+        valid_ref = all_valid
 
     mu_ref, sd_ref = _winsorized_mean_std(obs_values[valid_ref], z_limit=winsorize_z)
     base_val = mu_ref + baseline_z * sd_ref
@@ -197,10 +208,17 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
     ).fetchall():
         jolpica_pen_map[int(row["earned_id"])] = int(row["cnt"])
 
+    # Load circuits & wet-weather round classifications
+    circuits_meta = {
+        int(r["id"]): classify_circuit_type(r["reference"], r["name"])
+        for r in conn.execute("SELECT id, reference, name FROM circuits").fetchall()
+    }
+    wet_rounds = detect_wet_rounds(conn)
+
     # Load all non-cancelled rounds ordered chronologically
     rounds = conn.execute(
         """
-        SELECT r.id, r.number, r.race_number, r.name, r.date, s.year
+        SELECT r.id, r.circuit_id, r.number, r.race_number, r.name, r.date, s.year
         FROM rounds r
         JOIN seasons s ON s.id = r.season_id
         WHERE r.is_cancelled = 0
@@ -237,6 +255,8 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
 
     race_entries_by_round: dict[int, list[dict]] = {}
     quali_entries_by_round: dict[int, dict[str, dict[int, list[dict]]]] = {}
+    sprint_race_entries_by_round: dict[int, list[dict]] = {}
+    sprint_quali_entries_by_round: dict[int, dict[str, dict[int, list[dict]]]] = {}
     se_to_round_driver: dict[int, tuple[int, int, str]] = {}
 
     for row in raw_entries:
@@ -250,9 +270,15 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             race_entries_by_round.setdefault(rid, []).append(dict(row))
         elif stype in ("Q1", "Q2", "Q3", "QB", "QA", "QO"):
             quali_entries_by_round.setdefault(rid, {}).setdefault(stype, {}).setdefault(did, []).append(dict(row))
+        elif stype == "SR":
+            sprint_race_entries_by_round.setdefault(rid, []).append(dict(row))
+        elif stype in ("SQ1", "SQ2", "SQ3"):
+            sq_mapped = stype[1:]  # SQ1 -> Q1, SQ2 -> Q2, SQ3 -> Q3
+            sprint_quali_entries_by_round.setdefault(rid, {}).setdefault(sq_mapped, {}).setdefault(did, []).append(dict(row))
 
     # Load all laps efficiently (include historical qualifying laps where number IS NULL)
     laps_by_race_se: dict[int, list[tuple[int, int | None, float | None, int]]] = {}
+    laps_by_sprint_se: dict[int, list[tuple[int, float | None, int]]] = {}
     quali_min_lap_by_se: dict[int, float] = {}
     lap_id_to_se_num: dict[int, tuple[int, int]] = {}
 
@@ -274,7 +300,9 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             laps_by_race_se.setdefault(se_id, []).append(
                 (lnum, lrow["position"], tsec, is_del)
             )
-        elif stype in ("Q1", "Q2", "Q3", "QB", "QA", "QO") and not is_del and tsec and tsec > 25.0:
+        elif stype == "SR" and lnum is not None and lnum >= 2 and not is_del and tsec and 30.0 <= tsec <= 400.0:
+            laps_by_sprint_se.setdefault(se_id, []).append((lnum, tsec, is_del))
+        elif stype in ("Q1", "Q2", "Q3", "QB", "QA", "QO", "SQ1", "SQ2", "SQ3") and not is_del and tsec and tsec > 25.0:
             prev = quali_min_lap_by_se.get(se_id)
             if prev is None or tsec < prev:
                 quali_min_lap_by_se[se_id] = tsec
@@ -419,6 +447,54 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             driver_grids={int(e["driver_id"]): e.get("grid") for e in entries},
         )
 
+        # Sprint Qualifying (SQ1/SQ2/SQ3) & Sprint Race (SR) blending (weight 0.25 SQ / 0.30 SR)
+        sq_phases_raw = sprint_quali_entries_by_round.get(rid, {})
+        sq_times_by_phase: dict[str, dict[int, float]] = {}
+        for phase, qmap in sq_phases_raw.items():
+            phase_times = {}
+            for did, qentries in qmap.items():
+                best_t = None
+                for qentry in qentries:
+                    tsec = qentry.get("time_sec") or quali_min_lap_by_se.get(int(qentry["se_id"]))
+                    if tsec and tsec > 25.0 and (best_t is None or float(tsec) < best_t):
+                        best_t = float(tsec)
+                if best_t is not None:
+                    phase_times[did] = best_t
+            if phase_times:
+                sq_times_by_phase[phase] = phase_times
+        sq_metrics = compute_qualifying_metrics(sq_times_by_phase, driver_teams) if sq_times_by_phase else {}
+
+        sprint_pace_res: dict[int, float] = {}
+        sprint_pace_tm: dict[int, float] = {}
+        sr_entries = sprint_race_entries_by_round.get(rid, [])
+        if sr_entries:
+            sr_lap_pool = []
+            sr_by_drv: dict[int, list[float]] = {}
+            sr_team: dict[int, int] = {}
+            for sre in sr_entries:
+                sdid = int(sre["driver_id"])
+                sr_team[sdid] = int(sre["team_id"])
+                s_laps = [t for _, t, _ in laps_by_sprint_se.get(int(sre["se_id"]), []) if t is not None]
+                if len(s_laps) >= 3:
+                    sr_by_drv[sdid] = s_laps
+                    sr_lap_pool.extend(s_laps)
+            if len(sr_lap_pool) >= 20:
+                sr_med = float(np.median(sr_lap_pool))
+                for sdid, slist in sr_by_drv.items():
+                    clean_s = [t for t in slist if 0.88 * sr_med <= t <= 1.07 * sr_med]
+                    if len(clean_s) >= 3:
+                        sprint_pace_res[sdid] = float(np.clip(-100.0 * (float(np.median(clean_s)) - sr_med) / sr_med, -4.5, 4.5))
+                by_tm: dict[int, list[int]] = {}
+                for sdid, tid in sr_team.items():
+                    if sdid in sprint_pace_res:
+                        by_tm.setdefault(tid, []).append(sdid)
+                for tids in by_tm.values():
+                    if len(tids) >= 2:
+                        for d_i in tids:
+                            others = [sprint_pace_res[d_j] for d_j in tids if d_j != d_i]
+                            if others:
+                                sprint_pace_tm[d_i] = float(np.clip(sprint_pace_res[d_i] - float(np.mean(others)), -4.0, 4.0))
+
         # Pillar 3: Consistency
         cons_metrics = compute_race_consistency_metrics(entries, pace_metrics)
 
@@ -436,6 +512,8 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         )
 
         is_indy_500 = (rname == "Indianapolis 500" and 1950 <= year <= 1960)
+        c_type = circuits_meta.get(int(rnd["circuit_id"]) if rnd["circuit_id"] is not None else -1, "TECHNICAL")
+        is_wet = 1 if rid in wet_rounds else 0
 
         for e in entries:
             did = int(e["driver_id"])
@@ -446,6 +524,25 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             rm = rc_events[did]
             dmeta = drivers_meta[did]
 
+            sq_entry = sq_metrics.get(did, {})
+            sq_perf = sq_entry.get("quali_perf_pct")
+            sq_delta = sq_entry.get("quali_teammate_delta_pct")
+            q_perf = qm["quali_perf_pct"]
+            q_delta = qm["quali_teammate_delta_pct"]
+            if q_perf is not None and sq_perf is not None:
+                q_perf = float((1.0 * q_perf + 0.25 * sq_perf) / 1.25)
+            if q_delta is not None and sq_delta is not None:
+                q_delta = float((1.0 * q_delta + 0.25 * sq_delta) / 1.25)
+
+            sr_pace = sprint_pace_res.get(did)
+            sr_tm = sprint_pace_tm.get(did)
+            p_res = pm["pace_residual_pct"]
+            p_delta = pm["pace_teammate_delta_pct"]
+            if p_res is not None and sr_pace is not None:
+                p_res = float((1.0 * p_res + 0.30 * sr_pace) / 1.30)
+            if p_delta is not None and sr_tm is not None:
+                p_delta = float((1.0 * p_delta + 0.30 * sr_tm) / 1.30)
+
             all_race_metrics.append(
                 {
                     "round_id": rid,
@@ -455,6 +552,8 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
                     "round_number": rnum,
                     "round_name": rname,
                     "round_date": rdate,
+                    "circuit_type": c_type,
+                    "is_wet_race": is_wet,
                     "is_indy_500": is_indy_500,
                     "grid": e.get("grid"),
                     "effective_grid": rm["effective_grid"],
@@ -464,13 +563,15 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
                     "driver_fault_score": e["driver_fault_score"],
                     "fia_driving_penalties": e["fia_driving_penalties"],
                     "quali_session_used": qm["quali_session_used"],
-                    "quali_teammate_delta_pct": qm["quali_teammate_delta_pct"],
-                    "quali_perf_pct": qm["quali_perf_pct"],
+                    "quali_teammate_delta_pct": q_delta,
+                    "quali_perf_pct": q_perf,
+                    "sprint_quali_delta_pct": sq_delta,
+                    "sprint_pace_delta_pct": sr_tm,
                     "clean_air_laps": pm["clean_air_laps"],
                     "clean_laps_total": pm["clean_laps_total"],
-                    "pace_residual_pct": pm["pace_residual_pct"],
+                    "pace_residual_pct": p_res,
                     "stint_deg_bonus_pct": pm["stint_deg_bonus_pct"],
-                    "pace_teammate_delta_pct": pm["pace_teammate_delta_pct"],
+                    "pace_teammate_delta_pct": p_delta,
                     "pace_sample_weight": pm["pace_sample_weight"],
                     "stint_mad_pct": cm["stint_mad_pct"],
                     "incident_cost": cm["incident_cost"],
@@ -485,6 +586,7 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
                     "surv_q": rm.get("surv_q"),
                     "surv_gain": rm.get("surv_gain"),
                     "racecraft_score": None,
+                    "weekend_score": 82.0,
                     "cumulative_starts": cumulative_starts.get(did, 1),
                     "age_years": _compute_age_years(dmeta.get("date_of_birth"), rdate, year),
                     "data_tier": tier,
@@ -731,6 +833,57 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         else:
             row["rc_eff_w"] = 0.0
 
+    # Compute per-season mean pace/quali for era-neutralized All-Time specialties & weekend_score per GP
+    by_yr_p: dict[int, list[float]] = {}
+    by_yr_q: dict[int, list[float]] = {}
+    by_rnd_rows: dict[int, list[dict]] = {}
+    for row in all_race_metrics:
+        if np.isfinite(row["pace_isolated"]):
+            by_yr_p.setdefault(row["year"], []).append(float(row["pace_isolated"]))
+        if np.isfinite(row["quali_isolated"]):
+            by_yr_q.setdefault(row["year"], []).append(float(row["quali_isolated"]))
+        by_rnd_rows.setdefault(row["round_id"], []).append(row)
+
+    yr_p_mean = {y: float(np.mean(v)) for y, v in by_yr_p.items()}
+    yr_q_mean = {y: float(np.mean(v)) for y, v in by_yr_q.items()}
+    for row in all_race_metrics:
+        p_val = row["pace_isolated"]
+        q_val = row["quali_isolated"]
+        row["pace_era_adj"] = float(p_val - yr_p_mean.get(row["year"], 0.0)) if np.isfinite(p_val) else np.nan
+        row["quali_era_adj"] = float(q_val - yr_q_mean.get(row["year"], 0.0)) if np.isfinite(q_val) else np.nan
+
+    for r_rows in by_rnd_rows.values():
+        p_arr = np.array([x["pace_isolated"] for x in r_rows], dtype=float)
+        q_arr = np.array([x["quali_isolated"] for x in r_rows], dtype=float)
+        c_arr = np.array([x["consistency_combined"] for x in r_rows], dtype=float)
+        rc_arr = np.array([x["racecraft_score"] if x["racecraft_score"] is not None else np.nan for x in r_rows], dtype=float)
+
+        def _rnd_z(arr: np.ndarray) -> np.ndarray:
+            ok = np.isfinite(arr)
+            if np.sum(ok) < 2:
+                return np.zeros_like(arr)
+            m = float(np.mean(arr[ok]))
+            s = float(np.std(arr[ok])) or 1.0
+            return np.where(ok, np.clip((arr - m) / s, -3.5, 3.5), 0.0)
+
+        zp_r = _rnd_z(p_arr)
+        zq_r = _rnd_z(q_arr)
+        zc_r = _rnd_z(c_arr)
+        zrc_r = _rnd_z(rc_arr)
+        comb = 0.45 * zp_r + 0.30 * zq_r + 0.15 * zrc_r + 0.10 * zc_r
+        for idx_r, x in enumerate(r_rows):
+            if x["status_category"] == "DRIVER_ERROR":
+                comb[idx_r] -= 1.0 * float(x.get("driver_fault_score") or 0.5)
+        ok_comb = np.array([x["status_category"] != "DNS_OTHER" for x in r_rows], dtype=bool)
+        if np.sum(ok_comb) >= 2:
+            mc = float(np.mean(comb[ok_comb]))
+            sc = float(np.std(comb[ok_comb])) or 1.0
+            zw = np.clip((comb - mc) / sc, -3.5, 3.5)
+        else:
+            zw = np.zeros_like(comb)
+        for idx_r, x in enumerate(r_rows):
+            x["weekend_score"] = round(float(np.clip(82.0 + 6.0 * zw[idx_r], MIN_OVR, MAX_OVR)), 1)
+
     # Persist race_driver_metrics
     rdm_tuples = [
         (
@@ -741,6 +894,8 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             r["round_number"],
             r["round_name"],
             r["round_date"],
+            r["circuit_type"],
+            r["is_wet_race"],
             r["grid"],
             r["finish_pos"],
             r["points"],
@@ -750,6 +905,8 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             r["quali_session_used"],
             r["quali_teammate_delta_pct"],
             r["quali_perf_pct"],
+            r["sprint_quali_delta_pct"],
+            r["sprint_pace_delta_pct"],
             r["clean_air_laps"],
             r["clean_laps_total"],
             r["pace_residual_pct"],
@@ -767,6 +924,7 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             r["on_track_overtaken"],
             r["defense_laps"],
             r["racecraft_score"],
+            r["weekend_score"],
             r["cumulative_starts"],
             r["age_years"],
             r["data_tier"],
@@ -777,14 +935,16 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         """
         INSERT INTO race_driver_metrics (
             round_id, driver_id, team_id, year, round_number, round_name, round_date,
+            circuit_type, is_wet_race,
             grid, finish_pos, points, status_category, driver_fault_score, fia_driving_penalties,
             quali_session_used, quali_teammate_delta_pct, quali_perf_pct,
+            sprint_quali_delta_pct, sprint_pace_delta_pct,
             clean_air_laps, clean_laps_total, pace_residual_pct, stint_deg_bonus_pct,
             pace_teammate_delta_pct, pace_isolated, quali_isolated, pace_sample_weight, stint_mad_pct,
             consistency_error_score, consistency_variance_score,
             lap1_pos, lap1_net_gain, on_track_overtakes, on_track_overtaken,
-            defense_laps, racecraft_score, cumulative_starts, age_years, data_tier
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            defense_laps, racecraft_score, weekend_score, cumulative_starts, age_years, data_tier
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rdm_tuples,
     )
@@ -907,6 +1067,18 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         rc_n = np.zeros(n_drv)
         exp_obs = np.zeros(n_drv)
         exp_n = np.zeros(n_drv)
+        wet_obs = np.full(n_drv, np.nan)
+        wet_n = np.zeros(n_drv)
+        wet_cnt = np.zeros(n_drv, dtype=int)
+        street_obs = np.full(n_drv, np.nan)
+        street_n = np.zeros(n_drv)
+        street_cnt = np.zeros(n_drv, dtype=int)
+        hs_obs = np.full(n_drv, np.nan)
+        hs_n = np.zeros(n_drv)
+        hs_cnt = np.zeros(n_drv, dtype=int)
+        tyre_obs = np.full(n_drv, np.nan)
+        tyre_n = np.zeros(n_drv)
+        tyre_cnt = np.zeros(n_drv, dtype=int)
 
         meta_list: list[dict] = []
 
@@ -917,8 +1089,6 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
 
         for i, did in enumerate(cand_ids):
             drows = by_d[did]
-            # Use races from the target year (if active_driver_ids provided) to identify primary team
-            # Weighted means with exponential decay w = 2^(-delta_r / H)
             w_decay = np.array(
                 [2.0 ** (-(max_seq - round_seq[r["round_id"]]) / max(half_life_races, 1.0)) for r in drows],
                 dtype=float,
@@ -936,6 +1106,51 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             quali_obs[i], quali_n[i] = _wavg("quali_isolated", "quali_eff_w")
             cons_obs[i], cons_n[i] = _wavg("consistency_combined", "cons_eff_w")
             rc_obs[i], rc_n[i] = _wavg("racecraft_score", "rc_eff_w")
+
+            # Specialties within window
+            w_vals, w_ws = [], []
+            st_vals, st_ws = [], []
+            hs_vals, hs_ws = [], []
+            ty_vals, ty_ws = [], []
+            for idx_d, r in enumerate(drows):
+                dec = w_decay[idx_d]
+                pi = r["pace_isolated"]
+                qi = r["quali_isolated"]
+                ci = r["consistency_combined"]
+                if r["is_wet_race"] == 1 and (np.isfinite(pi) or np.isfinite(ci)):
+                    v = (0.65 * pi if np.isfinite(pi) else 0.0) + (0.35 * ci if np.isfinite(ci) else 0.0)
+                    w_vals.append(v)
+                    w_ws.append(dec)
+                if r["circuit_type"] == "STREET" and (np.isfinite(pi) or np.isfinite(qi)):
+                    v = (0.55 * qi if np.isfinite(qi) else 0.0) + (0.45 * pi if np.isfinite(pi) else 0.0)
+                    st_vals.append(v)
+                    st_ws.append(dec)
+                if r["circuit_type"] == "HIGH_SPEED" and (np.isfinite(pi) or np.isfinite(qi)):
+                    v = (0.55 * pi if np.isfinite(pi) else 0.0) + (0.45 * qi if np.isfinite(qi) else 0.0)
+                    hs_vals.append(v)
+                    hs_ws.append(dec)
+                if r["clean_laps_total"] > 0:
+                    deg_s = float(r.get("stint_deg_bonus_pct") or 0.0) / 0.06
+                    var_s = float(r.get("consistency_variance_score") or 0.0)
+                    ty_vals.append(deg_s + 0.35 * var_s)
+                    ty_ws.append(dec)
+
+            if w_vals:
+                wet_obs[i] = float(np.dot(w_vals, w_ws) / sum(w_ws))
+                wet_n[i] = float(sum(w_ws))
+                wet_cnt[i] = len(w_vals)
+            if st_vals:
+                street_obs[i] = float(np.dot(st_vals, st_ws) / sum(st_ws))
+                street_n[i] = float(sum(st_ws))
+                street_cnt[i] = len(st_vals)
+            if hs_vals:
+                hs_obs[i] = float(np.dot(hs_vals, hs_ws) / sum(hs_ws))
+                hs_n[i] = float(sum(hs_ws))
+                hs_cnt[i] = len(hs_vals)
+            if ty_vals:
+                tyre_obs[i] = float(np.dot(ty_vals, ty_ws) / sum(ty_ws))
+                tyre_n[i] = float(sum(ty_ws))
+                tyre_cnt[i] = len(ty_vals)
 
             max_starts = max(r["cumulative_starts"] for r in drows)
             exp_obs[i] = compute_experience_score(max_starts)
@@ -982,8 +1197,12 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         z_q, _ = _shrink_and_standardize_pillar(quali_obs, quali_n, ref_mask, shrinkage_m, baseline_z)
         z_c, _ = _shrink_and_standardize_pillar(cons_obs, cons_n, ref_mask, shrinkage_m, baseline_z)
         z_r, _ = _shrink_and_standardize_pillar(rc_obs, rc_n, ref_mask, shrinkage_m, baseline_z)
-        # Experience standardized directly without shrinkage toward negative prior
         z_e, _ = _shrink_and_standardize_pillar(exp_obs, exp_n, ref_mask, 0.0, 0.0)
+
+        z_wet, _ = _shrink_and_standardize_pillar(wet_obs, wet_n, ref_mask, 4.0, -0.10)
+        z_st, _ = _shrink_and_standardize_pillar(street_obs, street_n, ref_mask, 4.0, -0.10)
+        z_hs, _ = _shrink_and_standardize_pillar(hs_obs, hs_n, ref_mask, 4.0, -0.10)
+        z_ty, _ = _shrink_and_standardize_pillar(tyre_obs, tyre_n, ref_mask, 4.0, -0.10)
 
         z_raw = (
             weights["pace"] * z_p
@@ -1001,6 +1220,21 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         for i, m in enumerate(meta_list):
             tm = teams_meta.get(m["team_id"], {})
             shrink_w = float(m["eff_n_avg"] / (m["eff_n_avg"] + shrinkage_m)) if (m["eff_n_avg"] + shrinkage_m) > 0 else 0.0
+            ci_val = compute_confidence_interval(m["eff_n_avg"], shrinkage_m)
+            q_ovr = round(float(_map_z_to_ovr(z_q[i], base_ovr, scale_factor)), 1)
+            c_ovr = round(float(_map_z_to_ovr(z_c[i], base_ovr, scale_factor)), 1)
+            rc_ovr = round(float(_map_z_to_ovr(z_r[i], base_ovr, scale_factor)), 1)
+            w_ovr = round(float(_map_z_to_ovr(z_wet[i], base_ovr, scale_factor)), 1)
+            st_ovr = round(float(_map_z_to_ovr(z_st[i], base_ovr, scale_factor)), 1)
+            hs_ovr = round(float(_map_z_to_ovr(z_hs[i], base_ovr, scale_factor)), 1)
+            ty_ovr = round(float(_map_z_to_ovr(z_ty[i], base_ovr, scale_factor)), 1)
+            badges = generate_driver_badges(
+                w_ovr, int(wet_cnt[i]),
+                st_ovr, int(street_cnt[i]),
+                hs_ovr, int(hs_cnt[i]),
+                ty_ovr, int(tyre_cnt[i]),
+                q_ovr, rc_ovr, c_ovr,
+            )
             out_rows.append(
                 {
                     "driver_id": m["driver_id"],
@@ -1011,17 +1245,23 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
                     "clean_races_count": m["clean_races_count"],
                     "overall": int(round(float(ovr_raw[i]))),
                     "overall_raw": round(float(ovr_raw[i]), 2),
+                    "overall_ci": ci_val,
                     "z_final": round(float(z_final[i]), 4),
                     "pace_ovr": round(float(_map_z_to_ovr(z_p[i], base_ovr, scale_factor)), 1),
-                    "quali_ovr": round(float(_map_z_to_ovr(z_q[i], base_ovr, scale_factor)), 1),
-                    "consistency_ovr": round(float(_map_z_to_ovr(z_c[i], base_ovr, scale_factor)), 1),
-                    "racecraft_ovr": round(float(_map_z_to_ovr(z_r[i], base_ovr, scale_factor)), 1),
+                    "quali_ovr": q_ovr,
+                    "consistency_ovr": c_ovr,
+                    "racecraft_ovr": rc_ovr,
                     "experience_ovr": round(float(_map_z_to_ovr(z_e[i], base_ovr, scale_factor)), 1),
                     "z_pace": round(float(z_p[i]), 4),
                     "z_quali": round(float(z_q[i]), 4),
                     "z_consistency": round(float(z_c[i]), 4),
                     "z_racecraft": round(float(z_r[i]), 4),
                     "z_experience": round(float(z_e[i]), 4),
+                    "wet_ovr": w_ovr,
+                    "street_ovr": st_ovr,
+                    "high_speed_ovr": hs_ovr,
+                    "tyre_mgmt_ovr": ty_ovr,
+                    "badges_json": json.dumps(badges, ensure_ascii=False),
                     "car_rating": m["car_rating"],
                     "shrinkage_weight": round(shrink_w, 3),
                     "data_tier": m["data_tier"],
@@ -1032,6 +1272,41 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
                 }
             )
         return out_rows
+
+    def _season_rating_tuple(yr: int, mode: str, item: dict, delta: float | None) -> tuple:
+        return (
+            yr,
+            item["driver_id"],
+            mode,
+            item["team_id"],
+            item["team_name"],
+            item["team_color"],
+            item["races_count"],
+            item["clean_races_count"],
+            item["overall"],
+            item["overall_raw"],
+            item["overall_ci"],
+            item["z_final"],
+            item["pace_ovr"],
+            item["quali_ovr"],
+            item["consistency_ovr"],
+            item["racecraft_ovr"],
+            item["experience_ovr"],
+            item["z_pace"],
+            item["z_quali"],
+            item["z_consistency"],
+            item["z_racecraft"],
+            item["z_experience"],
+            item["wet_ovr"],
+            item["street_ovr"],
+            item["high_speed_ovr"],
+            item["tyre_mgmt_ovr"],
+            item["badges_json"],
+            item["car_rating"],
+            item["shrinkage_weight"],
+            delta,
+            item["data_tier"],
+        )
 
     # Compute each historical season [year-1, year] for drivers active in `year`
     for yr in all_years:
@@ -1053,36 +1328,7 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
             prev = prev_season_overall.get(did)
             delta = round(item["overall_raw"] - prev, 2) if prev is not None else None
             prev_season_overall[did] = item["overall_raw"]
-
-            season_ratings_db.append(
-                (
-                    yr,
-                    did,
-                    "season",
-                    item["team_id"],
-                    item["team_name"],
-                    item["team_color"],
-                    item["races_count"],
-                    item["clean_races_count"],
-                    item["overall"],
-                    item["overall_raw"],
-                    item["z_final"],
-                    item["pace_ovr"],
-                    item["quali_ovr"],
-                    item["consistency_ovr"],
-                    item["racecraft_ovr"],
-                    item["experience_ovr"],
-                    item["z_pace"],
-                    item["z_quali"],
-                    item["z_consistency"],
-                    item["z_racecraft"],
-                    item["z_experience"],
-                    item["car_rating"],
-                    item["shrinkage_weight"],
-                    delta,
-                    item["data_tier"],
-                )
-            )
+            season_ratings_db.append(_season_rating_tuple(yr, "season", item, delta))
 
         # Also record strict single-season standardized pillar Z-scores for All-Time Peak+Longevity
         strict_yr_rows = [r for r in all_race_metrics if r["year"] == yr and not r["is_indy_500"]]
@@ -1128,45 +1374,18 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         did = item["driver_id"]
         prev = prev_yr_map.get(did)
         delta = round(item["overall_raw"] - prev, 2) if prev is not None else None
-        season_ratings_db.append(
-            (
-                max_season_year,
-                did,
-                "rolling_current",
-                item["team_id"],
-                item["team_name"],
-                item["team_color"],
-                item["races_count"],
-                item["clean_races_count"],
-                item["overall"],
-                item["overall_raw"],
-                item["z_final"],
-                item["pace_ovr"],
-                item["quali_ovr"],
-                item["consistency_ovr"],
-                item["racecraft_ovr"],
-                item["experience_ovr"],
-                item["z_pace"],
-                item["z_quali"],
-                item["z_consistency"],
-                item["z_racecraft"],
-                item["z_experience"],
-                item["car_rating"],
-                item["shrinkage_weight"],
-                delta,
-                item["data_tier"],
-            )
-        )
+        season_ratings_db.append(_season_rating_tuple(max_season_year, "rolling_current", item, delta))
 
     conn.executemany(
         """
         INSERT INTO driver_season_ratings (
             year, driver_id, mode, team_id, team_name, team_color,
-            races_count, clean_races_count, overall, overall_raw, z_final,
+            races_count, clean_races_count, overall, overall_raw, overall_ci, z_final,
             pace_ovr, quali_ovr, consistency_ovr, racecraft_ovr, experience_ovr,
             z_pace, z_quali, z_consistency, z_racecraft, z_experience,
+            wet_ovr, street_ovr, high_speed_ovr, tyre_mgmt_ovr, badges_json,
             car_rating, shrinkage_weight, delta_vs_prev, data_tier
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         season_ratings_db,
     )
@@ -1184,6 +1403,19 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
     at_rc_n = np.zeros(n_all)
     at_exp = np.zeros(n_all)
     at_exp_n = np.full(n_all, 100.0)
+
+    at_wet = np.full(n_all, np.nan)
+    at_wet_n = np.zeros(n_all)
+    at_wet_cnt = np.zeros(n_all, dtype=int)
+    at_street = np.full(n_all, np.nan)
+    at_street_n = np.zeros(n_all)
+    at_street_cnt = np.zeros(n_all, dtype=int)
+    at_hs = np.full(n_all, np.nan)
+    at_hs_n = np.zeros(n_all)
+    at_hs_cnt = np.zeros(n_all, dtype=int)
+    at_tyre = np.full(n_all, np.nan)
+    at_tyre_n = np.zeros(n_all)
+    at_tyre_cnt = np.zeros(n_all, dtype=int)
 
     peak_pace = np.full(n_all, np.nan)
     peak_quali = np.full(n_all, np.nan)
@@ -1304,6 +1536,40 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
         at_rc_n[i] = eq_starts
         at_exp[i] = compute_experience_score(int(round(eq_starts)))
 
+        # Era-adjusted All-Time Specialties
+        w_l, st_l, hs_l, ty_l = [], [], [], []
+        for r in drows:
+            pi = r["pace_era_adj"]
+            qi = r["quali_era_adj"]
+            ci = r["consistency_combined"]
+            if r["is_wet_race"] == 1 and (np.isfinite(pi) or np.isfinite(ci)):
+                w_l.append((0.65 * pi if np.isfinite(pi) else 0.0) + (0.35 * ci if np.isfinite(ci) else 0.0))
+            if r["circuit_type"] == "STREET" and (np.isfinite(pi) or np.isfinite(qi)):
+                st_l.append((0.55 * qi if np.isfinite(qi) else 0.0) + (0.45 * pi if np.isfinite(pi) else 0.0))
+            if r["circuit_type"] == "HIGH_SPEED" and (np.isfinite(pi) or np.isfinite(qi)):
+                hs_l.append((0.55 * pi if np.isfinite(pi) else 0.0) + (0.45 * qi if np.isfinite(qi) else 0.0))
+            if r["clean_laps_total"] > 0:
+                deg_s = float(r.get("stint_deg_bonus_pct") or 0.0) / 0.06
+                var_s = float(r.get("consistency_variance_score") or 0.0)
+                ty_l.append(deg_s + 0.35 * var_s)
+
+        if w_l:
+            at_wet[i] = float(np.mean(w_l))
+            at_wet_n[i] = float(len(w_l))
+            at_wet_cnt[i] = len(w_l)
+        if st_l:
+            at_street[i] = float(np.mean(st_l))
+            at_street_n[i] = float(len(st_l))
+            at_street_cnt[i] = len(st_l)
+        if hs_l:
+            at_hs[i] = float(np.mean(hs_l))
+            at_hs_n[i] = float(len(hs_l))
+            at_hs_cnt[i] = len(hs_l)
+        if ty_l:
+            at_tyre[i] = float(np.mean(ty_l))
+            at_tyre_n[i] = float(len(ty_l))
+            at_tyre_cnt[i] = len(ty_l)
+
         at_meta.append(
             {
                 "driver_id": did,
@@ -1377,51 +1643,79 @@ def run_full_computation(conn: sqlite3.Connection) -> dict:
     mu_lg, sd_lg = _winsorized_mean_std(zraw_lg[at_ref], z_limit=None)
     ovr_lg = _map_z_to_ovr(np.clip((zraw_lg - mu_lg) / sd_lg, -3.8, 3.8), DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)
 
-    alltime_tuples = [
-        (
-            m["driver_id"],
-            m["career_starts"],
-            m["career_wins"],
-            m["career_podiums"],
-            m["championships"],
-            m["first_year"],
-            m["last_year"],
-            m["peak_years"],
-            m["primary_team_name"],
-            m["primary_team_color"],
-            int(round(float(ovr_at[i]))),
-            round(float(ovr_at[i]), 2),
-            round(float(ovr_pk[i]), 2),
-            round(float(ovr_lg[i]), 2),
-            round(float(_map_z_to_ovr(zp_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
-            round(float(_map_z_to_ovr(zq_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
-            round(float(_map_z_to_ovr(zc_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
-            round(float(_map_z_to_ovr(zr_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
-            round(float(_map_z_to_ovr(ze_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
-            round(float(zp_at[i]), 4),
-            round(float(zq_at[i]), 4),
-            round(float(zc_at[i]), 4),
-            round(float(zr_at[i]), 4),
-            round(float(ze_at[i]), 4),
-            m["mechanical_dnfs_excluded"],
-            m["driver_error_dnfs"],
-            m["fia_penalties_count"],
-            m["clean_air_laps_total"],
-            m["data_tier"],
+    z_at_wet, _ = _shrink_and_standardize_pillar(at_wet, at_wet_n, at_ref, 6.0, -0.15)
+    z_at_st, _ = _shrink_and_standardize_pillar(at_street, at_street_n, at_ref, 6.0, -0.15)
+    z_at_hs, _ = _shrink_and_standardize_pillar(at_hs, at_hs_n, at_ref, 6.0, -0.15)
+    z_at_ty, _ = _shrink_and_standardize_pillar(at_tyre, at_tyre_n, at_ref, 6.0, -0.15)
+
+    alltime_tuples = []
+    for i, m in enumerate(at_meta):
+        ci_val = compute_confidence_interval(m["eq_starts"], alltime_m)
+        q_ovr = round(float(_map_z_to_ovr(zq_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        c_ovr = round(float(_map_z_to_ovr(zc_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        rc_ovr = round(float(_map_z_to_ovr(zr_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        w_ovr = round(float(_map_z_to_ovr(z_at_wet[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        st_ovr = round(float(_map_z_to_ovr(z_at_st[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        hs_ovr = round(float(_map_z_to_ovr(z_at_hs[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        ty_ovr = round(float(_map_z_to_ovr(z_at_ty[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1)
+        badges = generate_driver_badges(
+            w_ovr, int(at_wet_cnt[i]),
+            st_ovr, int(at_street_cnt[i]),
+            hs_ovr, int(at_hs_cnt[i]),
+            ty_ovr, int(at_tyre_cnt[i]),
+            q_ovr, rc_ovr, c_ovr,
         )
-        for i, m in enumerate(at_meta)
-    ]
+        alltime_tuples.append(
+            (
+                m["driver_id"],
+                m["career_starts"],
+                m["career_wins"],
+                m["career_podiums"],
+                m["championships"],
+                m["first_year"],
+                m["last_year"],
+                m["peak_years"],
+                m["primary_team_name"],
+                m["primary_team_color"],
+                int(round(float(ovr_at[i]))),
+                round(float(ovr_at[i]), 2),
+                ci_val,
+                round(float(ovr_pk[i]), 2),
+                round(float(ovr_lg[i]), 2),
+                round(float(_map_z_to_ovr(zp_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
+                q_ovr,
+                c_ovr,
+                rc_ovr,
+                round(float(_map_z_to_ovr(ze_at[i], DEFAULT_BASE_OVR, DEFAULT_SCALE_FACTOR)), 1),
+                round(float(zp_at[i]), 4),
+                round(float(zq_at[i]), 4),
+                round(float(zc_at[i]), 4),
+                round(float(zr_at[i]), 4),
+                round(float(ze_at[i]), 4),
+                w_ovr,
+                st_ovr,
+                hs_ovr,
+                ty_ovr,
+                json.dumps(badges, ensure_ascii=False),
+                m["mechanical_dnfs_excluded"],
+                m["driver_error_dnfs"],
+                m["fia_penalties_count"],
+                m["clean_air_laps_total"],
+                m["data_tier"],
+            )
+        )
     conn.executemany(
         """
         INSERT INTO driver_alltime_ratings (
             driver_id, career_starts, career_wins, career_podiums, championships,
             first_year, last_year, peak_years, primary_team_name, primary_team_color,
-            overall, overall_raw, peak_overall, longevity_overall,
+            overall, overall_raw, overall_ci, peak_overall, longevity_overall,
             pace_ovr, quali_ovr, consistency_ovr, racecraft_ovr, experience_ovr,
             z_pace, z_quali, z_consistency, z_racecraft, z_experience,
+            wet_ovr, street_ovr, high_speed_ovr, tyre_mgmt_ovr, badges_json,
             mechanical_dnfs_excluded, driver_error_dnfs, fia_penalties_count,
             clean_air_laps_total, data_tier
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         alltime_tuples,
     )
