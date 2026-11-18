@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowUpDown, Calendar, Car, Flame, ShieldAlert, Sparkles } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { ArrowUpDown, Calendar, Car, Flag, Flame, ShieldAlert, Sparkles } from 'lucide-react';
 import { api } from '../api/client';
+import { CountryFlag } from '../components/CountryFlag';
+import { DriverAvatar } from '../components/DriverAvatar';
 import { dataTierLabel, DriverCard } from '../components/DriverCard';
 import { OverallBadge } from '../components/OverallBadge';
 import type { SeasonDriverRating, SeasonMeta, SeasonRankingsResponse } from '../types/f1';
@@ -19,8 +21,16 @@ type SortKey =
 const FEATURED_SEASONS = [2026, 2025, 2024, 2021, 2012, 2007, 2004, 1994, 1988, 1976, 1965, 1955];
 
 export function SeasonRankingsPage() {
-  const [mode, setMode] = useState<'current' | 'season'>('current');
-  const [selectedYear, setSelectedYear] = useState<number>(2026);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const yearParam = searchParams.get('year');
+  const parsedYear = yearParam ? Number(yearParam) : null;
+
+  const [mode, setMode] = useState<'current' | 'season'>(
+    parsedYear && !Number.isNaN(parsedYear) ? 'season' : 'current'
+  );
+  const [selectedYear, setSelectedYear] = useState<number>(
+    parsedYear && !Number.isNaN(parsedYear) ? parsedYear : 2026
+  );
   const [seasons, setSeasons] = useState<SeasonMeta[]>([]);
   const [data, setData] = useState<SeasonRankingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,9 +40,16 @@ export function SeasonRankingsPage() {
   const [sortAsc, setSortAsc] = useState(false);
 
   useEffect(() => {
+    if (parsedYear && !Number.isNaN(parsedYear)) {
+      setMode('season');
+      setSelectedYear(parsedYear);
+    }
+  }, [parsedYear]);
+
+  useEffect(() => {
     api.getSeasons().then((res) => {
       setSeasons(res.seasons);
-      if (res.seasons.length > 0) {
+      if (res.seasons.length > 0 && !(parsedYear && !Number.isNaN(parsedYear))) {
         setSelectedYear(res.seasons[0].year);
       }
     }).catch(() => {});
@@ -113,7 +130,10 @@ export function SeasonRankingsPage() {
             <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1">
               <button
                 type="button"
-                onClick={() => setMode('current')}
+                onClick={() => {
+                  setMode('current');
+                  setSearchParams({});
+                }}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-bold transition ${
                   mode === 'current'
                     ? 'bg-[#E10600] text-white'
@@ -138,7 +158,11 @@ export function SeasonRankingsPage() {
             {mode === 'season' && (
               <select
                 value={selectedYear}
-                onChange={(e) => setSelectedYear(Number(e.target.value))}
+                onChange={(e) => {
+                  const yr = Number(e.target.value);
+                  setSelectedYear(yr);
+                  setSearchParams({ year: String(yr) });
+                }}
                 aria-label="Selecionar temporada"
                 className="rounded-xl border border-white/15 bg-[#121622] px-3.5 py-2 font-mono text-sm font-bold text-white focus:border-[#E10600] focus:outline-none"
               >
@@ -153,27 +177,47 @@ export function SeasonRankingsPage() {
         </div>
 
         {/* Quick season jump chips */}
-        <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-white/5 pt-4">
-          <span className="mr-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            Atalhos de Era:
-          </span>
-          {FEATURED_SEASONS.map((yr) => (
-            <button
-              key={yr}
-              type="button"
-              onClick={() => {
-                setMode('season');
-                setSelectedYear(yr);
-              }}
-              className={`rounded-md px-2.5 py-1 font-mono text-xs font-semibold transition ${
-                mode === 'season' && selectedYear === yr
-                  ? 'bg-white text-black'
-                  : 'bg-white/5 text-slate-300 hover:bg-white/10'
-              }`}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/5 pt-4">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              Atalhos de Era:
+            </span>
+            {FEATURED_SEASONS.map((yr) => (
+              <button
+                key={yr}
+                type="button"
+                onClick={() => {
+                  setMode('season');
+                  setSelectedYear(yr);
+                  setSearchParams({ year: String(yr) });
+                }}
+                className={`rounded-md px-2.5 py-1 font-mono text-xs font-semibold transition ${
+                  mode === 'season' && selectedYear === yr
+                    ? 'bg-white text-black'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+              >
+                {yr}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to={`/races?year=${data?.year ?? selectedYear}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-white/10 hover:text-white transition"
             >
-              {yr}
-            </button>
-          ))}
+              <Flag className="h-3.5 w-3.5 text-red-400" />
+              GPs de {data?.year ?? selectedYear}
+            </Link>
+            <Link
+              to={`/what-if?year=${data?.year ?? selectedYear}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 transition"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+              E se Carros Iguais ({data?.year ?? selectedYear})?
+            </Link>
+          </div>
         </div>
       </section>
 
@@ -212,10 +256,13 @@ export function SeasonRankingsPage() {
                   name={d.name}
                   abbreviation={d.abbreviation}
                   nationality={d.nationality}
+                  countryCode={d.country_code}
                   teamName={d.team_name}
                   teamColor={d.team_color}
                   overall={d.overall}
                   overallRaw={d.overall_raw}
+                  overallCi={d.overall_ci}
+                  badges={d.badges}
                   pace={d.pace_ovr}
                   qualifying={d.quali_ovr}
                   consistency={d.consistency_ovr}
@@ -285,13 +332,17 @@ export function SeasonRankingsPage() {
                             to={`/drivers/${d.reference}`}
                             className="flex items-center gap-2.5 group"
                           >
-                            <span
-                              className="h-6 w-1 rounded-full shrink-0"
-                              style={{ backgroundColor: d.team_color || '#94A3B8' }}
+                            <DriverAvatar
+                              reference={d.reference}
+                              name={d.name}
+                              abbreviation={d.abbreviation}
+                              teamColor={d.team_color}
+                              size="xs"
                             />
-                            <div>
+                            <div className="min-w-0">
                               <div className="flex items-center gap-1.5 font-bold text-white group-hover:text-red-400 transition-colors">
-                                {d.name}
+                                <CountryFlag countryCode={d.country_code} nationality={d.nationality} size="xs" />
+                                <span className="truncate">{d.name}</span>
                                 {d.shrinkage_weight < 0.7 && (
                                   <span
                                     title={`Amostra reduzida: Bayesian Shrinkage ativo (${(d.shrinkage_weight * 100).toFixed(0)}% peso observado)`}
@@ -301,22 +352,34 @@ export function SeasonRankingsPage() {
                                   </span>
                                 )}
                               </div>
-                              <div className="text-[11px] text-slate-400">{d.team_name}</div>
+                              <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                                <span>{d.team_name}</span>
+                                {d.badges?.[0] && (
+                                  <span className="hidden sm:inline rounded bg-amber-500/10 px-1.5 py-0 text-[9px] font-semibold text-amber-300 border border-amber-400/20">
+                                    {d.badges[0]}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </Link>
                         </td>
                         <td className="px-3 py-3">
                           <div className="flex items-center gap-2">
                             <OverallBadge score={d.overall} size="sm" />
-                            {d.delta_vs_prev !== null && (
-                              <span
-                                className={`font-mono text-[10px] font-bold ${
-                                  d.delta_vs_prev >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                              >
-                                {d.delta_vs_prev >= 0 ? `+${d.delta_vs_prev.toFixed(1)}` : d.delta_vs_prev.toFixed(1)}
+                            <div className="flex flex-col leading-tight">
+                              <span className="font-mono text-[10px] text-slate-500">
+                                ±{d.overall_ci.toFixed(1)}
                               </span>
-                            )}
+                              {d.delta_vs_prev !== null && (
+                                <span
+                                  className={`font-mono text-[10px] font-bold ${
+                                    d.delta_vs_prev >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                  }`}
+                                >
+                                  {d.delta_vs_prev >= 0 ? `+${d.delta_vs_prev.toFixed(1)}` : d.delta_vs_prev.toFixed(1)}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-3 py-3 font-mono font-semibold text-slate-200 tabular-nums">{d.pace_ovr.toFixed(1)}</td>
