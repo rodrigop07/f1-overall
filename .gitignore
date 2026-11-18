@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project specific: F1 Overall
+backend/.venv/
+backend/data/cache/
+backend/data/*.sqlite*
+backend/data/*.db*
+frontend/node_modules/
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.DS_Store

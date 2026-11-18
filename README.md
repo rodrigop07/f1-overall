@@ -1,1 +1,64 @@
-# f1view
+# F1 Overall — Sistema de Avaliação de Pilotos da Fórmula 1 (1950–2026)
+
+Plataforma Full-Stack que calcula o **Overall (0–99)** de todos os pilotos da história da Fórmula 1 (`1950–2026`), isolando a habilidade individual da performance do carro (~75–85% do resultado bruto em pista).
+
+## Metodologia Estatística Implementada
+
+### 1. Isolamento Piloto vs. Carro
+- **Delta de Companheiro**: Comparação em diferença percentual simétrica (`%`) de tempo de volta entre companheiros de equipe na mesma corrida e na mesma fase da classificação, neutralizando o comprimento de cada circuito.
+- **Calibração em Rede (LMM / Ridge IRLS)**: Resolução esparsa (`scipy.sparse.linalg.lsqr` + pesos robustos de Huber) conectando todo o histórico de duelos entre equipes e temporadas:
+  $$\text{Desempenho}_{i,r} = \alpha_{\text{piloto}} + \gamma_{\text{equipe},\text{temporada}} + \beta_1(\text{Idade} - 27) + \beta_2(\text{Idade} - 27)^2 + \varepsilon$$
+
+### 2. Pilares e Pesos do Overall
+1. **Ritmo de Corrida (35%)**: Mediana do delta percentual em **ar limpo** (gap $\ge 1.8\text{s}$ para o carro à frente reconstruído via relógio acumulado de pista), corrigido por queima de combustível, composto de pneu (`SOFT`/`MEDIUM`/`HARD`/`INTERMEDIATE`/`WET`), idade do pneu e bônus de conservação de degradação por stint.
+2. **Classificação (25%)**: Mediana do delta percentual na última sessão válida disputada em igualdade pelos dois carros da equipe (`Q3` → `Q2` → `Q1` ou `QB`/`QA` em eras clássicas).
+3. **Consistência / Consciência (20%)**: Taxa de corridas sem erros próprios (penalizando apenas abandonos por erro/colisão e punições de condução da FIA, ajustados à média da época) + baixa variância intrastint medida via MAD detrendado.
+4. **Combate / Racecraft (15%)**: Saldo de posições na Volta 1 ajustado pela curva empírica da posição do grid + eficiência de ultrapassagens e defesas em bandeira verde.
+5. **Experiência (5%)**: Curva logarítmica acumulada de GPs largados ($\ln(1 + \min(N_{\text{starts}}, 350))$).
+
+### 3. Regras de Higiene de Dados (Data Hygiene)
+- Uso sistemático de **mediana**, **MAD** e **média aparada**.
+- **Separação estrita de abandonos**: DNFs mecânicos ou de equipe (`Engine`, `Gearbox`, `Hydraulics`, `Electrical`, `Suspension`, desclassificações técnicas) são excluídos da amostra de erro e nunca penalizam o piloto.
+- **Filtragem de voltas anômalas**: Remoção automática de Volta 1, voltas deletadas, `in-laps`, `out-laps`, Safety Car / VSC / Bandeira Vermelha e outliers $> 1.07\times$ a mediana da volta.
+
+### 4. Pipeline Matemático Final
+- **Ponderação Temporal**: Decaimento exponencial ($w_r = 2^{-\Delta r / H}$) para Overall Atual ($H=16$ GPs) e por Temporada ($H=14$ GPs); combinação **75% Janela de Auge (melhor triênio)** + **25% Longevidade** para o Ranking Histórico All-Time.
+- **Bayesian Shrinkage**: $\text{ScoreAjustado} = \frac{n \cdot \text{Observado} + m \cdot \text{MédiaBase}}{n + m}$ ($m = 10$ GPs por padrão).
+- **Padronização Z-Score & Escala (60–99)**:
+  $$\text{Overall} = \text{clip}\big(82 + 6 \cdot Z_{\text{final}},\, 60,\, 99\big)$$
+
+---
+
+## Fontes de Dados (Ingestão Multi-Camada)
+- **Jolpica-F1 (CSV Dump Oficial + REST API Incremental)**: Histórico completo de 1950 a 2026 (`drivers`, `teams`, `sessions`, `laps` volta a volta desde 1996, `pit_stops` e motivos detalhados de DNF).
+- **OpenF1 API (`2023–2026`)**: Compostos de pneu por stint, idade inicial do pneu, neutralizações `SC`/`VSC` e punições dos comissários da FIA no controle de prova.
+- **FastF1 SDK (`2018–2026`)**: Conector oficial com cache em disco e suporte opcional a autenticação F1 TV (`FASTF1_TOKEN` ou login interativo via `python -m app.cli sync-fastf1`).
+
+---
+
+## Arquitetura do Projeto
+
+- `backend/` — **Python 3.12 + FastAPI + SQLite + NumPy/SciPy/Pandas/FastF1**
+- `frontend/` — **React 19 + TypeScript + Vite + Tailwind CSS + Recharts**
+
+### Como Executar Localmente
+
+```bash
+# 1. Configurar ambiente Python e dependências do Frontend
+make setup
+
+# 2. Baixar dados reais (1950–2026) e calcular todo o modelo estatístico
+make bootstrap
+
+# 3. Auditar métricas no terminal
+make audit
+
+# 4. Rodar backend (porta 8000) e frontend (porta 5173) em desenvolvimento
+make dev
+```
+
+### Comandos Úteis da CLI
+- `cd backend && .venv/bin/python -m app.cli sync` — Sincroniza novas corridas de 2026 via Jolpica REST + OpenF1 e recalcula as notas.
+- `cd backend && .venv/bin/python -m app.cli recompute` — Recalcula o modelo matemático localmente a partir do SQLite.
+- `cd backend && .venv/bin/python -m app.cli sync-fastf1` — Enriquece sessões de 2018–2026 com FastF1 (requer cache local ou assinatura F1 TV).
+- `make test` — Executa a suíte de testes unitários/integração (`pytest`) e o build de produção do frontend (`tsc -b && vite build`).
