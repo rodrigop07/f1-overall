@@ -1,4 +1,5 @@
-.PHONY: setup bootstrap compute sync dev-backend dev-frontend dev test build audit
+.PHONY: setup bootstrap compute sync dev-backend dev-frontend dev test build audit \
+        docker-build docker-up docker-down docker-logs docker-sync docker-recompute docker-audit
 
 PYTHON := backend/.venv/bin/python
 PYTEST := backend/.venv/bin/pytest
@@ -38,3 +39,24 @@ test:
 
 build:
 	cd frontend && npm run build
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d --build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
+
+docker-sync:
+	docker compose exec backend python -m app.cli sync
+
+docker-recompute:
+	docker compose exec backend python -m app.cli recompute
+
+docker-audit:
+	docker compose exec backend python -m app.cli audit

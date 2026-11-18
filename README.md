@@ -75,3 +75,40 @@ make dev
 - `cd backend && .venv/bin/python -m app.cli recompute` — Recalcula o modelo matemático localmente a partir do SQLite.
 - `cd backend && .venv/bin/python -m app.cli sync-fastf1` — Enriquece sessões de 2018–2026 com FastF1 (requer cache local ou assinatura F1 TV).
 - `make test` — Executa a suíte de testes unitários/integração (`pytest`) e o build de produção do frontend (`tsc -b && vite build`).
+
+---
+
+## Execução com Docker & Docker Compose
+
+O projeto conta com dockerização multi-serviço (`docker-compose.yml` com Nginx + FastAPI) e também com um `Dockerfile` all-in-one na raiz para deploy em nuvem (Cloud Run / Railway / Render / Fly.io).
+
+### Subir localmente com Docker Compose
+
+```bash
+# Opcional: copie e personalize portas/variáveis (.env)
+cp .env.example .env
+
+# Build e inicialização em segundo plano (use sudo se o usuário ainda não estiver no grupo docker)
+docker compose up -d --build
+```
+
+- **Interface Web (Frontend Nginx + proxy `/api`)**: `http://localhost:8080` (ajustável via `FRONTEND_PORT`)
+- **API FastAPI & Swagger (`/docs`)**: `http://localhost:8010/docs` (ajustável via `BACKEND_PORT`)
+- **Persistência & Bootstrap Automático**: O diretório local `./backend/data` é montado em `/data` dentro do container `backend`. Se o arquivo `f1_overall.sqlite` já existir populado, a API sobe imediatamente; caso esteja vazio, o script `backend/entrypoint.sh` executa `python -m app.cli bootstrap --skip-fastf1` automaticamente na primeira inicialização (`AUTO_BOOTSTRAP=true`).
+
+### Comandos Make para Docker
+- `make docker-build` — Constrói as imagens `backend` e `frontend`
+- `make docker-up` — Sobe toda a stack com `docker compose up -d --build`
+- `make docker-down` — Encerra os containers preservando `./backend/data`
+- `make docker-logs` — Acompanha logs de ambos os containers
+- `make docker-sync` — Executa sincronização incremental + OpenF1 + recomputação dentro do container
+- `make docker-recompute` — Recalcula o modelo estatístico dentro do container
+- `make docker-audit` — Imprime relatório de cobertura e rankings do container
+
+### Imagem Única (All-in-One para PaaS)
+Para ambientes que esperam um único container servindo API e SPA:
+
+```bash
+docker build -t f1-overall:all-in-one .
+docker run -d -p 8000:8000 -v $(pwd)/backend/data:/data f1-overall:all-in-one
+```
