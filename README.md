@@ -112,3 +112,12 @@ Para ambientes que esperam um único container servindo API e SPA:
 docker build -t f1-overall:all-in-one .
 docker run -d -p 8000:8000 -v $(pwd)/backend/data:/data f1-overall:all-in-one
 ```
+
+---
+
+## Deploy em Produção (Railway + Vercel)
+
+- **Backend API (Railway)**: Serviço `f1-overall` configurado no diretório `/backend` (branch `develop`), com volume persistente `/data` e URL pública `https://f1-overall-production.up.railway.app`.
+- **Frontend SPA + Proxy `/api` (Vercel)**: Os arquivos `vercel.json` (raiz) e `frontend/vercel.json` já redirecionam `/api/:path*` para `https://f1-overall-production.up.railway.app/api/:path*` e encaminham rotas do React Router para `/index.html`.
+  1. Faça push da branch `develop` (ou merge em `main`): `git push origin develop`
+  2. No painel da **Vercel**, importe o repositório `rodrigop07/f1-overall` selecionando a branch `develop` (funciona tanto deixando **Root Directory** na raiz `./` quanto escolhendo `frontend`) e clique em **Deploy**.
