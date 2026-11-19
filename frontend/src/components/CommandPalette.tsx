@@ -22,6 +22,7 @@ const STATIC_PAGES: CommandItem[] = [
   { id: 'page-compare', kind: 'page', title: 'Comparador H2H', subtitle: 'Duelo direto e caminho em grafo entre qualquer dupla', to: '/compare' },
   { id: 'page-network', kind: 'page', title: 'Rede de Companheiros', subtitle: 'Grafo global de calibração desde 1950', to: '/network' },
   { id: 'page-sandbox', kind: 'page', title: 'Sandbox & Metodologia', subtitle: 'Ajuste de pesos dos 5 pilares e decomposição de variância', to: '/sandbox' },
+  { id: 'page-about', kind: 'page', title: 'Sobre o Autor & Projeto (@rodrigop07)', subtitle: 'Rodrigo Pinheiro · UFCA · GitHub e arquitetura do F1 Overall', badge: 'Autor', to: '/sobre' },
 ];
 
 interface CommandPaletteProps {
@@ -201,7 +202,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           ) : (
             items.map((item, idx) => {
               const Icon =
-                item.kind === 'driver'
+                item.kind === 'driver' || item.id === 'page-about'
                   ? User
                   : item.kind === 'team'
                     ? Shield
